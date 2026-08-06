@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosError, AxiosInstance } from 'axios';
 import * as cheerio from 'cheerio';
 import type { Agent } from 'node:http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -55,9 +55,14 @@ export class NescoPortalClient {
   private readonly logger = new Logger(NescoPortalClient.name);
   private readonly http: AxiosInstance;
 
+  /** Credential-free rendering of the active proxy, for logs and errors. */
+  private readonly proxyDescription?: string;
+
   constructor(private readonly config: ConfigService) {
     const proxyUrl = this.config.get<string>('NESCO_PROXY_URL');
     const agent = proxyUrl ? this.createProxyAgent(proxyUrl) : undefined;
+
+    this.proxyDescription = proxyUrl ? redactCredentials(proxyUrl) : undefined;
 
     this.http = axios.create({
       timeout: NESCO_REQUEST_TIMEOUT_MS,
@@ -75,10 +80,8 @@ export class NescoPortalClient {
         : {}),
     });
 
-    if (proxyUrl) {
-      this.logger.log(
-        `Portal requests routed via ${redactCredentials(proxyUrl)}`,
-      );
+    if (this.proxyDescription) {
+      this.logger.log(`Portal requests routed via ${this.proxyDescription}`);
     }
   }
 
@@ -244,13 +247,56 @@ export class NescoPortalClient {
 
         throw new NescoPortalError(
           'UPSTREAM_UNREACHABLE',
-          `The NESCO portal could not be reached (${error.code ?? 'unknown error'})`,
+          `The NESCO portal could not be reached (${this.describeTransportFailure(error)})`,
           error,
         );
       }
 
       throw error;
     }
+  }
+
+  /**
+   * Renders a connection failure into something an operator can act on.
+   *
+   * `error.code` alone is not enough. Node sets it for its own socket errors
+   * (ECONNREFUSED, ENOTFOUND), but a SOCKS handshake rejected by the proxy
+   * arrives as a plain `Error` with a descriptive message and no code at all —
+   * so keying on the code collapsed every proxy misconfiguration into the
+   * single useless string "unknown error".
+   *
+   * Naming the proxy matters just as much. Once traffic is tunnelled there are
+   * two hops that can fail and the reason reads `UPSTREAM_UNREACHABLE` for
+   * both, even though "your proxy refused the connection" and "the portal is
+   * down" call for opposite responses.
+   */
+  private describeTransportFailure(error: AxiosError): string {
+    const seen = new Set<string>();
+    const parts: string[] = [];
+
+    const add = (value: string | undefined): void => {
+      const trimmed = value?.trim();
+      if (trimmed && !seen.has(trimmed)) {
+        seen.add(trimmed);
+        parts.push(trimmed);
+      }
+    };
+
+    add(error.code);
+
+    // Walk the cause chain: the actionable detail is often one level down,
+    // where axios has wrapped the agent's error in a generic message. Bounded
+    // because `cause` is attacker-agnostic but not guaranteed acyclic.
+    let current: unknown = error;
+    for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
+      add(current.message);
+      current = (current as { cause?: unknown }).cause;
+    }
+
+    if (parts.length === 0) add('unknown error');
+    if (this.proxyDescription) add(`via proxy ${this.proxyDescription}`);
+
+    return parts.join('; ');
   }
 
   private asHtml(data: unknown): string {

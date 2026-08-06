@@ -25,7 +25,7 @@ async function bootstrap() {
 
   setupSwagger(app);
   const port = configService.getOrThrow<number>('PORT');
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
 
   return { url: await app.getUrl(), port };
 }

@@ -236,6 +236,29 @@ export class EnvironmentVariables {
   @IsInt()
   @Min(1)
   USAGE_MAX_WINDOW_HOURS: number = 48;
+
+  /**
+   * Proxy through which NESCO portal requests are sent. Optional.
+   *
+   * The portal answers HTTP 403 to every source IP outside Bangladesh, so a
+   * deployment hosted anywhere else cannot reach it at all — not even the GET
+   * that mints the CSRF token. Point this at a proxy with a Bangladeshi address
+   * and the portal sees that address instead of the host's.
+   *
+   * Leave it empty when the host is already in Bangladesh, including local
+   * development: unset means a direct connection, which is what you want.
+   *
+   * Only NESCO traffic is affected. Deliberately not `HTTPS_PROXY`, which every
+   * outbound client in the process would pick up — the database, Firebase and
+   * SMTP have no reason to take a detour through Bangladesh.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^(https?|socks|socks4a?|socks5h?):\/\/.+/, {
+    message:
+      'NESCO_PROXY_URL must be a proxy URL such as socks5://127.0.0.1:1080 or http://user:pass@host:8080',
+  })
+  NESCO_PROXY_URL?: string;
 }
 
 export function validateEnv(

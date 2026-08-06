@@ -137,13 +137,6 @@ export class NescoService {
     }
   }
 
-  /**
-   * Maps every portal failure to a status code.
-   *
-   * The `never` assignment in the default branch is load-bearing: adding a new
-   * `NescoFailureReason` without handling it here fails the build instead of
-   * degrading into an opaque 500 at runtime.
-   */
   private toHttpException(error: NescoPortalError): HttpException {
     switch (error.reason) {
       case 'CUSTOMER_NOT_FOUND':

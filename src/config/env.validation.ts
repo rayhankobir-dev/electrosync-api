@@ -1,5 +1,7 @@
 import { Transform, plainToInstance } from 'class-transformer';
 import {
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsInt,
   IsOptional,
@@ -28,6 +30,29 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(65535)
   PORT: number = 3000;
+
+  /**
+   * Comma-separated list of allowed browser origins.
+   *
+   * Parsed here rather than in `main.ts` because `enableCors` compares the
+   * request's `Origin` header against this value with `===` when it is a
+   * string. Handing it the raw `"a,b"` env value is not an error — it simply
+   * matches nothing, so every cross-origin request is rejected while the
+   * configuration reads as if it were set. Splitting to an array is what makes
+   * each entry independently matchable.
+   */
+  @Transform(({ value }): string[] => {
+    if (Array.isArray(value)) return value as string[];
+    if (typeof value !== 'string') return [];
+    return value
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
+  })
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsString({ each: true })
+  CORS_ORIGINS: string[];
 
   /**
    * RS256 keypair, PEM-encoded.

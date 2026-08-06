@@ -10,20 +10,21 @@ const logger = new Logger('Mohajon');
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
+  const corsOrigins = configService.getOrThrow<string[]>('CORS_ORIGINS');
 
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(createValidationPipe());
   app.enableShutdownHooks();
 
   app.enableCors({
-    origin: ['exp://192.168.1.107:8082', 'http://localhost:8082'],
+    origin: corsOrigins,
     credentials: true,
     methods: ['GET', 'QUERY', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
 
   setupSwagger(app);
-  const configService = app.get(ConfigService);
-  const port = parseInt(configService.getOrThrow('PORT'), 10);
+  const port = configService.getOrThrow<number>('PORT');
   await app.listen(port);
 
   return { url: await app.getUrl(), port };

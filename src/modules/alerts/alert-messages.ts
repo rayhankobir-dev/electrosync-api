@@ -10,6 +10,12 @@ export interface AlertContext {
   readonly threshold: number;
   /** Gross amount of the recharge, for RECHARGE_DETECTED only. */
   readonly rechargeAmount: number;
+  /** What the flagged day cost, for USAGE_ANOMALY only. */
+  readonly anomalyCost: number;
+  /** The trailing baseline it was measured against, for USAGE_ANOMALY only. */
+  readonly anomalyBaseline: number;
+  /** Whole percent above baseline, for USAGE_ANOMALY only. */
+  readonly anomalyPercent: number;
 }
 
 export interface AlertCopy {
@@ -47,6 +53,15 @@ const COPY: Record<
       title: 'Recharge confirmed',
       body: `${money(c.rechargeAmount)} was recharged on ${c.meterName}. The balance is now ${money(c.balance)}.`,
     }),
+    /**
+     * Leads with the percentage and then shows its working. "You used more
+     * than usual" on its own invites the reply "how much is usual?", and the
+     * user cannot check from a lock screen — so both numbers travel with it.
+     */
+    [ALERT_KIND.USAGE_ANOMALY]: (c) => ({
+      title: 'Unusual usage',
+      body: `${c.meterName} used ${money(c.anomalyCost)} yesterday — ${c.anomalyPercent}% above its recent average of ${money(c.anomalyBaseline)} a day.`,
+    }),
   },
   bn: {
     [ALERT_KIND.LOW_BALANCE]: (c) => ({
@@ -60,6 +75,10 @@ const COPY: Record<
     [ALERT_KIND.RECHARGE_DETECTED]: (c) => ({
       title: 'রিচার্জ সম্পন্ন',
       body: `${c.meterName} মিটারে ${money(c.rechargeAmount)} রিচার্জ হয়েছে। বর্তমান ব্যালেন্স ${money(c.balance)}।`,
+    }),
+    [ALERT_KIND.USAGE_ANOMALY]: (c) => ({
+      title: 'অস্বাভাবিক ব্যবহার',
+      body: `${c.meterName} মিটারে গতকাল ${money(c.anomalyCost)} খরচ হয়েছে — সাম্প্রতিক দৈনিক গড় ${money(c.anomalyBaseline)} এর চেয়ে ${c.anomalyPercent}% বেশি।`,
     }),
   },
 };

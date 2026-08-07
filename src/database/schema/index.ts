@@ -237,6 +237,19 @@ export const meterAlertState = pgTable('meter_alert_state', {
    */
   lastBalanceAt: timestamp('last_balance_at', { withTimezone: true }),
   lastRechargeToken: text('last_recharge_token'),
+  /**
+   * Asia/Dhaka calendar day the last usage-anomaly alert was *about*, as
+   * `YYYY-MM-DD`. Null until one fires.
+   *
+   * The dedup key for anomaly alerts, and it has to record the subject day
+   * rather than a "last sent at" instant: the sweep runs four times a day and
+   * every one of those passes re-evaluates the same completed yesterday. Keyed
+   * on the day being reported, passes two through four recognise their own
+   * earlier work and stay quiet. A timestamp would need a "was that within the
+   * same Dhaka day?" comparison to reach the same answer, and would get it
+   * wrong across the midnight boundary the alert is defined by.
+   */
+  lastAnomalyOn: text('last_anomaly_on'),
   lastCheckedAt: timestamp('last_checked_at'),
   lastFailureReason: text('last_failure_reason'),
   consecutiveFailures: integer('consecutive_failures').notNull().default(0),

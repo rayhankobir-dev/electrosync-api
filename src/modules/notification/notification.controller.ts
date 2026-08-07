@@ -45,12 +45,36 @@ export class NotificationController {
     return this.notifications.listForUser(user.id, query);
   }
 
+  /**
+   * Declared before `:id/read` for readability only — the two cannot collide,
+   * since this path is one segment and that one is two.
+   */
+  @Patch('read-all')
+  @ApiOperation({
+    summary: 'Mark all your unread notifications read. Idempotent.',
+  })
+  @ApiOkResponse({ description: 'How many rows were marked read.' })
+  markAllAsRead(@CurrentUser() user: AuthenticatedUser) {
+    return this.notifications.markAllAsRead(user.id);
+  }
+
   @Patch(':id/read')
   @ApiOperation({ summary: 'Mark one of your notifications read. Idempotent.' })
   @ApiOkResponse({ description: 'The updated notification.' })
   @ApiNotFoundResponse({ description: 'No such notification for this user.' })
   markAsRead(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.notifications.markAsRead(id, user.id);
+  }
+
+  @Delete()
+  @ApiOperation({
+    summary:
+      'Clear your notification list. Archives rather than deletes, so the ' +
+      'history stays available via ?includeArchived=true.',
+  })
+  @ApiOkResponse({ description: 'How many rows were archived.' })
+  archiveAll(@CurrentUser() user: AuthenticatedUser) {
+    return this.notifications.archiveAll(user.id);
   }
 
   @Post('tokens')

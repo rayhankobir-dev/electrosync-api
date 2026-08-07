@@ -114,6 +114,49 @@ export class EnvironmentVariables {
   FIREBASE_PRIVATE_KEY?: string;
 
   /**
+   * bulksmsbd gateway credentials for the SMS alert channel.
+   *
+   * Optional as a pair, on the same terms as `FIREBASE_*`: the app boots
+   * without them and every other endpoint works, but users who switched
+   * `smsAlerts` on receive push only. `SmsService` logs a startup warning
+   * naming that degradation, so an unconfigured production deployment is
+   * visible in the boot output rather than discovered by a user who never got
+   * their low-balance text.
+   *
+   * Both must be present for the channel to arm — an API key without a sender
+   * ID is rejected by the gateway on every send, which would burn a round trip
+   * per alert to learn what startup already knew.
+   */
+  @IsOptional()
+  @IsString()
+  SMS_PROVIDER_API_KEY?: string;
+
+  /**
+   * The approved alphanumeric or numeric sender the message appears from.
+   * Registered with the provider; an unregistered value fails every send.
+   */
+  @IsOptional()
+  @IsString()
+  SMS_PROVIDER_SENDER_ID?: string;
+
+  /**
+   * Overrides the gateway endpoint. Unset is correct in production.
+   *
+   * Exists for two cases: pointing staging at a mock so test alerts do not cost
+   * real money, and dropping back to bulksmsbd's documented `http://` URL if
+   * their TLS endpoint ever regresses. Defaults to the HTTPS form, because the
+   * API key rides in the query string and plaintext would expose it to every
+   * hop.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^https?:\/\/.+/, {
+    message:
+      'SMS_PROVIDER_URL must be an http(s) URL, e.g. https://bulksmsbd.net/api/smsapi',
+  })
+  SMS_PROVIDER_URL?: string;
+
+  /**
    * SMTP credentials for outbound mail — currently only password-reset codes.
    *
    * Optional as a set, on the same terms as `FIREBASE_*`: the app boots without

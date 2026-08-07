@@ -57,6 +57,20 @@ export class MailService {
   }
 
   /**
+   * Whether a real SMTP connection exists behind `send`.
+   *
+   * Exposed because the two callers want opposite things from an unconfigured
+   * transport. A password reset still calls `send` and lets the code land in
+   * the log, which is what makes local development possible. An alert must not:
+   * it would report a delivery that never happened to a user who is relying on
+   * the channel, so `NotificationService` checks this and reports a skip
+   * instead. Mirrors `SmsService.isConfigured`.
+   */
+  get isConfigured(): boolean {
+    return this.transporter !== null;
+  }
+
+  /**
    * Delivers one message, or throws.
    *
    * Callers are expected to let the throw propagate. Swallowing it would turn a

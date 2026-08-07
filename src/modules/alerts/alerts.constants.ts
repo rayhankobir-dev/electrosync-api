@@ -36,6 +36,38 @@ export const DEFAULT_SWEEP_CONCURRENCY = 3;
 export const DEFAULT_MAX_COST_PER_HOUR = 500;
 
 /**
+ * Days of history the usage-anomaly baseline averages over.
+ *
+ * Two weeks is long enough that one heavy weekend cannot drag the mean up
+ * behind a genuine spike, and short enough to track the seasonal drift that
+ * dominates consumption here — a baseline built over a quarter would call
+ * every day of a Rajshahi summer an anomaly against a March average.
+ */
+export const ANOMALY_BASELINE_DAYS = 14;
+
+/**
+ * Baseline days required before the alert arms at all.
+ *
+ * Half the full window. Waiting for all fourteen would leave a new meter silent
+ * for a fortnight; fewer than seven and a single unusual day is a seventh of
+ * the "normal" it is being measured against, which is how a baseline ends up
+ * chasing the noise it is supposed to filter.
+ */
+export const ANOMALY_MIN_BASELINE_DAYS = 7;
+
+/**
+ * Daily spend below which the baseline is treated as too small to compare
+ * against, in BDT.
+ *
+ * The guard that stops the whole feature from crying wolf. A ratio is unstable
+ * near zero: on a meter idling at ৳2/day, somebody boiling a kettle is a 150%
+ * rise and every threshold in the settings screen fires. ৳15/day is roughly a
+ * small flat's floor consumption, so anything under it is a meter nobody is
+ * really living behind — a holiday home, or one just added.
+ */
+export const ANOMALY_MIN_BASELINE_COST = 15;
+
+/**
  * Window length past which a sample is flagged as stale.
  *
  * Two days is comfortably more than the four sweeps a day the default schedule

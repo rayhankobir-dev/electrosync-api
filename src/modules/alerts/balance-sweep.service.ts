@@ -15,17 +15,20 @@ import {
   meterUsageSample,
   user,
 } from '@/database/schema';
-import { type AlertKind } from '@/database/types/alert.type';
+import { ALERT_KIND, type AlertKind } from '@/database/types/alert.type';
 import { MeterProvider } from '@/database/types/meter.type';
+import { USAGE_GRANULARITY } from '@/database/types/usage.type';
 import { type DrizzleDb } from '@/database/types/drizzle';
 import {
   DEFAULT_USER_SETTINGS,
   type UserSettings,
 } from '@/database/types/user-settings.type';
+import { AnalyticsService } from '@/modules/analytics/analytics.service';
 import { NescoService, type NescoSnapshot } from '@/modules/nesco/nesco.service';
 import { NotificationService } from '@/modules/notification/notification.service';
 
 import {
+  ANOMALY_BASELINE_DAYS,
   DEFAULT_MAX_COST_PER_HOUR,
   DEFAULT_MAX_WINDOW_HOURS,
   DEFAULT_SWEEP_CONCURRENCY,
@@ -40,6 +43,45 @@ import {
   evaluate,
   type PreviousState,
 } from './alert-evaluation';
+import {
+  evaluateUsageAnomaly,
+  type AnomalyFinding,
+} from './usage-anomaly';
+
+/**
+ * Asia/Dhaka calendar helpers, as `YYYY-MM-DD`.
+ *
+ * Bangladesh is UTC+6 all year with no daylight saving, so shifting the instant
+ * by a fixed six hours and reading the UTC date off it is exact rather than an
+ * approximation — the same assumption `AnalyticsService` makes, and the reason
+ * these are six lines instead of a date library.
+ *
+ * Local to this file because the analytics service keeps its own offset
+ * private, and a shared date module for three functions used in one place would
+ * be indirection without a second caller.
+ */
+const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
+
+function dhakaDay(instant: Date): string {
+  return new Date(instant.getTime() + DHAKA_OFFSET_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function dhakaToday(): string {
+  return dhakaDay(new Date());
+}
+
+/** `day` shifted back by `count` days. Operates on the date, not the clock. */
+function dhakaDaysBefore(day: string, count: number): string {
+  const shifted = new Date(`${day}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() - count);
+  return shifted.toISOString().slice(0, 10);
+}
+
+function dhakaDayBefore(day: string): string {
+  return dhakaDaysBefore(day, 1);
+}
 
 interface MonitoredMeter {
   readonly meterId: string;
@@ -53,6 +95,8 @@ interface MonitoredMeter {
   readonly lastBalance: number | null;
   /** Start of the next usage window. Advances only on a successful poll. */
   readonly lastBalanceAt: Date | null;
+  /** Dhaka day the last usage-anomaly alert covered. Null until one fires. */
+  readonly lastAnomalyOn: string | null;
 }
 
 export interface SweepSummary {
@@ -82,6 +126,7 @@ export class BalanceSweepService implements OnModuleInit {
     private readonly config: ConfigService,
     private readonly nesco: NescoService,
     private readonly notifications: NotificationService,
+    private readonly analytics: AnalyticsService,
     private readonly scheduler: SchedulerRegistry,
   ) {}
 
@@ -242,7 +287,25 @@ export class BalanceSweepService implements OnModuleInit {
         );
       }
 
-      return result.alerts.length;
+      // After `recordSuccess`, so the sample this poll just wrote is part of
+      // the series the baseline is built from. On its own error boundary: the
+      // balance alerts above are the job this sweep exists to do, and an
+      // advisory notice must not be able to mark the meter failed and have a
+      // later pass redo work that already succeeded.
+      const anomalies = await this.checkUsageAnomaly(row).catch(
+        (anomalyError: unknown) => {
+          this.logger.warn(
+            `Usage-anomaly check failed for meter ${row.meterId}: ${
+              anomalyError instanceof Error
+                ? anomalyError.message
+                : String(anomalyError)
+            }`,
+          );
+          return 0;
+        },
+      );
+
+      return result.alerts.length + anomalies;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.logger.warn(
@@ -253,11 +316,74 @@ export class BalanceSweepService implements OnModuleInit {
     }
   }
 
+  /**
+   * Compares the meter's last completed day against its own trailing baseline
+   * and pushes at most one notice. Returns how many alerts were sent (0 or 1).
+   *
+   * The decision itself lives in `evaluateUsageAnomaly`, which is pure. What
+   * this method owns is everything that needs the outside world: fetching the
+   * series, and stamping the dedup marker so the next three sweeps today stay
+   * quiet about the same day.
+   */
+  private async checkUsageAnomaly(row: MonitoredMeter): Promise<number> {
+    const settings = { ...DEFAULT_USER_SETTINGS, ...(row.settings ?? {}) };
+
+    // Cheapest possible exit, taken before any query: most accounts will have
+    // this on, but the ones that do not should cost nothing per sweep.
+    if (!settings.pushEnabled || !settings.usageAnomalyAlerts) return 0;
+
+    const today = dhakaToday();
+    const yesterday = dhakaDayBefore(today);
+
+    // A day already reported cannot become newsworthy again, and this is the
+    // branch three of every four daily sweeps take.
+    if (row.lastAnomalyOn !== null && row.lastAnomalyOn >= yesterday) return 0;
+
+    // `to: yesterday` is the load-bearing half of this range. Today is still
+    // accumulating, and letting a part-finished day into the series would make
+    // every morning look like a saving and the alert would never fire.
+    const usage = await this.analytics.usage(row.userId, {
+      granularity: USAGE_GRANULARITY.DAILY,
+      from: dhakaDaysBefore(yesterday, ANOMALY_BASELINE_DAYS),
+      to: yesterday,
+      meterId: row.meterId,
+    });
+
+    const outcome = evaluateUsageAnomaly(
+      usage.points.flatMap((point) =>
+        // `date` is optional on the DTO because the `weekday` granularity has
+        // no calendar date to report. Daily always sets it, so this filter
+        // never drops a row in practice — it is how that invariant is stated
+        // to the compiler rather than asserted past it with a `!`.
+        point.date
+          ? [{ day: point.date, consumedCost: point.consumedCost }]
+          : [],
+      ),
+      row.settings,
+      row.lastAnomalyOn,
+    );
+
+    if (outcome.kind !== 'anomaly') return 0;
+
+    // Stamped before sending, matching how `recordSuccess` treats the balance
+    // alerts: a dropped notification is better than one replayed every six
+    // hours for a day the user has already been told about.
+    await this.db
+      .update(meterAlertState)
+      .set({ lastAnomalyOn: outcome.finding.day, updatedAt: new Date() })
+      .where(eq(meterAlertState.meterId, row.meterId));
+
+    await this.push(row, ALERT_KIND.USAGE_ANOMALY, 0, 0, outcome.finding);
+
+    return 1;
+  }
+
   private async push(
     row: MonitoredMeter,
     kind: AlertKind,
     balance: number,
     rechargeAmount: number,
+    anomaly: AnomalyFinding | null = null,
   ): Promise<void> {
     const settings = { ...DEFAULT_USER_SETTINGS, ...(row.settings ?? {}) };
 
@@ -266,6 +392,9 @@ export class BalanceSweepService implements OnModuleInit {
       balance,
       threshold: settings.lowBalanceThreshold,
       rechargeAmount,
+      anomalyCost: anomaly?.cost ?? 0,
+      anomalyBaseline: anomaly?.baseline ?? 0,
+      anomalyPercent: anomaly?.percentAbove ?? 0,
     });
 
     await this.notifications.sendToUser(row.userId, {
@@ -278,6 +407,14 @@ export class BalanceSweepService implements OnModuleInit {
         meterId: row.meterId,
         customerNo: row.customerNo,
         balance: String(balance),
+        // Only on the anomaly push. Spread rather than set to null because a
+        // null would reach FCM as a value and be rejected on every other kind.
+        ...(anomaly
+          ? {
+              anomalyDay: anomaly.day,
+              anomalyPercent: String(anomaly.percentAbove),
+            }
+          : {}),
       },
     });
   }
@@ -295,6 +432,7 @@ export class BalanceSweepService implements OnModuleInit {
           lastRechargeToken: meterAlertState.lastRechargeToken,
           lastBalance: meterAlertState.lastBalance,
           lastBalanceAt: meterAlertState.lastBalanceAt,
+          lastAnomalyOn: meterAlertState.lastAnomalyOn,
         })
         .from(meter)
         .innerJoin(user, eq(user.id, meter.userId))

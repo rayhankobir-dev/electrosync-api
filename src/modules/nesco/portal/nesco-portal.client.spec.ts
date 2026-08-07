@@ -196,3 +196,215 @@ describe('NescoPortalClient transport diagnostics', () => {
     expect(message).not.toContain('proxy');
   });
 });
+
+/**
+ * Free Bangladeshi proxies are individually unreliable — each is up roughly
+ * half the time — but they fail independently, so trying several in turn is
+ * what makes the set usable without paying for egress.
+ */
+describe('NescoPortalClient egress failover', () => {
+  const PAGE = '<meta name="csrf-token" content="tok"><html>report</html>';
+
+  /** An axios double that fails or succeeds on demand, recording its calls. */
+  function route(behaviour: 'fail' | 'ok') {
+    const response = {
+      data: PAGE,
+      headers: { 'set-cookie': ['session=abc; Path=/'] },
+    };
+    const reject = () =>
+      Promise.reject(
+        new axios.AxiosError('connect ECONNREFUSED', 'ECONNREFUSED'),
+      );
+
+    return {
+      get: jest.fn(
+        behaviour === 'ok' ? () => Promise.resolve(response) : reject,
+      ),
+      post: jest.fn(
+        behaviour === 'ok' ? () => Promise.resolve(response) : reject,
+      ),
+    };
+  }
+
+  function clientOver(routes: ReturnType<typeof route>[], proxies: string) {
+    const create = jest.spyOn(axios, 'create');
+    routes.forEach((r) => create.mockReturnValueOnce(r as never));
+
+    return new NescoPortalClient({
+      get: jest.fn().mockReturnValue(proxies),
+    } as unknown as ConfigService);
+  }
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('falls back to the next proxy when the first is unreachable', async () => {
+    const [dead, alive] = [route('fail'), route('ok')];
+    const client = clientOver(
+      [dead, alive],
+      'socks5://dead.example:1080,socks5://alive.example:1080',
+    );
+
+    await expect(
+      client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY),
+    ).resolves.toContain('report');
+    expect(dead.get).toHaveBeenCalled();
+    expect(alive.post).toHaveBeenCalled();
+  });
+
+  it('keeps both legs of one exchange on the same proxy', async () => {
+    const [dead, alive] = [route('fail'), route('ok')];
+    const client = clientOver(
+      [dead, alive],
+      'socks5://dead.example:1080,socks5://alive.example:1080',
+    );
+
+    await client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY);
+
+    // The CSRF token and session cookie are bound to the address the portal
+    // saw on the GET. Retrying only the POST through a different egress would
+    // present a token minted for a session that IP never opened.
+    expect(alive.get).toHaveBeenCalledTimes(1);
+    expect(alive.post).toHaveBeenCalledTimes(1);
+    expect(dead.post).not.toHaveBeenCalled();
+  });
+
+  it('reports the final failure when every proxy is down', async () => {
+    const client = clientOver(
+      [route('fail'), route('fail')],
+      'socks5://a.example:1080,socks5://b.example:1080',
+    );
+
+    await expect(
+      client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY),
+    ).rejects.toThrow(/could not be reached/);
+  });
+
+  it('tolerates whitespace and blank entries in the list', () => {
+    const routes = [route('ok'), route('ok')];
+    clientOver(routes, ' socks5://a.example:1080 , , socks5://b.example:1080 ');
+
+    expect(axios.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('makes exactly one attempt when a single proxy is configured', async () => {
+    const only = route('fail');
+    const client = clientOver([only], 'socks5://only.example:1080');
+
+    await expect(
+      client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY),
+    ).rejects.toThrow();
+    expect(only.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NescoPortalClient route stickiness', () => {
+  const PAGE = '<meta name="csrf-token" content="tok"><html>report</html>';
+
+  function stubRoute(behaviour: 'fail' | 'ok') {
+    const response = {
+      data: PAGE,
+      headers: { 'set-cookie': ['session=abc; Path=/'] },
+    };
+    const send = () =>
+      behaviour === 'ok'
+        ? Promise.resolve(response)
+        : Promise.reject(
+            new axios.AxiosError('connect ECONNREFUSED', 'ECONNREFUSED'),
+          );
+
+    return { get: jest.fn(send), post: jest.fn(send) };
+  }
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('starts subsequent lookups at the route that last worked', async () => {
+    const [dead, alive] = [stubRoute('fail'), stubRoute('ok')];
+    const create = jest.spyOn(axios, 'create');
+    [dead, alive].forEach((r) => create.mockReturnValueOnce(r as never));
+
+    const client = new NescoPortalClient({
+      get: jest
+        .fn()
+        .mockReturnValue(
+          'socks5://dead.example:1080,socks5://alive.example:1080',
+        ),
+    } as unknown as ConfigService);
+
+    await client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY);
+    expect(dead.get).toHaveBeenCalledTimes(1);
+
+    await client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY);
+
+    // Without stickiness the dead route is retried on every lookup, and each
+    // retry costs a full connect timeout before failover — measured at ~15s
+    // per dead entry against real proxies, on every single request.
+    expect(dead.get).toHaveBeenCalledTimes(1);
+    expect(alive.get).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * The exchange has two legs and they fail for different reasons. A refusal on
+ * the opening GET carries no cookies and no token, so it can only be about the
+ * connection itself; a refusal on the POST, which does carry both, implicates
+ * the session. Naming the leg is what makes that distinction readable from a
+ * log line instead of inferred from a status code.
+ */
+describe('NescoPortalClient failure attribution', () => {
+  const PAGE = '<meta name="csrf-token" content="tok"><html>report</html>';
+  const okResponse = {
+    data: PAGE,
+    headers: { 'set-cookie': ['customer_service_portal_session=abc; Path=/'] },
+  };
+
+  function clientWhere(
+    get: jest.Mock,
+    post: jest.Mock = jest.fn().mockResolvedValue(okResponse),
+  ) {
+    jest.spyOn(axios, 'create').mockReturnValue({ get, post } as never);
+    return new NescoPortalClient({
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as ConfigService);
+  }
+
+  const refusal = () => {
+    const error = new axios.AxiosError('Request failed', 'ERR_BAD_REQUEST');
+    error.response = { status: 403 } as never;
+    return error;
+  };
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('names the opening GET when the session request is refused', async () => {
+    const client = clientWhere(jest.fn().mockRejectedValue(refusal()));
+
+    await expect(
+      client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY),
+    ).rejects.toThrow(/403.*session GET/);
+  });
+
+  it('names the report POST when only the second leg is refused', async () => {
+    const client = clientWhere(
+      jest.fn().mockResolvedValue(okResponse),
+      jest.fn().mockRejectedValue(refusal()),
+    );
+
+    await expect(
+      client.fetchReport('33009605', SUBMIT_TYPE.RECHARGE_HISTORY),
+    ).rejects.toThrow(/403.*report POST/);
+  });
+});

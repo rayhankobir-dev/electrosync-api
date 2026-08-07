@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from '@/app.module';
+import { AllExceptionsFilter } from '@/common/filters/all-exceptions.filter';
 import { createValidationPipe } from '@/common/pipes/validation.pipe';
 import { setupSwagger } from './config/swagger.config';
 import { Logger } from '@nestjs/common';
@@ -15,6 +16,7 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(createValidationPipe());
+  app.useGlobalFilters(new AllExceptionsFilter());
   app.enableShutdownHooks();
 
   app.enableCors({

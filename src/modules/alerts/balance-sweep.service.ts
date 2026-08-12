@@ -24,7 +24,10 @@ import {
   type UserSettings,
 } from '@/database/types/user-settings.type';
 import { AnalyticsService } from '@/modules/analytics/analytics.service';
-import { NescoService, type NescoSnapshot } from '@/modules/nesco/nesco.service';
+import {
+  NescoService,
+  type NescoSnapshot,
+} from '@/modules/nesco/nesco.service';
 import { NotificationService } from '@/modules/notification/notification.service';
 
 import {
@@ -43,10 +46,7 @@ import {
   evaluate,
   type PreviousState,
 } from './alert-evaluation';
-import {
-  evaluateUsageAnomaly,
-  type AnomalyFinding,
-} from './usage-anomaly';
+import { evaluateUsageAnomaly, type AnomalyFinding } from './usage-anomaly';
 
 /**
  * Asia/Dhaka calendar helpers, as `YYYY-MM-DD`.

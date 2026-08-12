@@ -54,10 +54,7 @@ export interface IssuedRequest {
  * The distinction is for logs and tests, not for the response.
  */
 export type CodeRejection =
-  | 'missing'
-  | 'expired'
-  | 'consumed'
-  | 'attempts-exhausted';
+  'missing' | 'expired' | 'consumed' | 'attempts-exhausted';
 
 export type ThrottleReason = 'cooldown' | 'quota';
 

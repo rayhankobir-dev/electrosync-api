@@ -1,85 +1,139 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# ElectroSync API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS backend for ElectroSync: user accounts, saved meters, usage analytics and
+low-balance alerts, on top of the NESCO prepaid customer portal
+(`customer.nesco.gov.bd`).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://coveralls.io/github/nestjs/nest?branch=master" target="_blank"><img src="https://coveralls.io/repos/github/nestjs/nest/badge.svg?branch=master#9" alt="Coverage" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Why this cannot run on a foreign host
 
-## Description
+NESCO refuses requests by **source IP**. From any host outside Bangladesh every
+upstream request comes back as a bare `403` with a zero-length body, which
+surfaced downstream as a confusing `list index out of range` before the portal
+client learned to report what it actually received.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+The diagnosis, one hypothesis at a time — each failed fix eliminating a whole
+class of solutions rather than being wasted effort:
 
-## Project setup
+| Evidence | Conclusion |
+|---|---|
+| TLS handshake succeeds, valid `*.nesco.gov.bd` cert | Not a network-layer block — the real server is reached |
+| `example.com` returns 200 from the same host | Outbound networking is fine |
+| Chrome-like headers → still 403 | Not User-Agent / header filtering |
+| Chrome TLS fingerprint (JA3) → still 403 | Not bot fingerprinting |
+| Site root also 403 | Not path-specific |
+| Blocked from US **and** Mumbai regions | Foreign IPs refused, not one bad region |
+| Works from a Bangladesh ISP IP | Bangladesh-only access |
+
+One consequence follows, and it is the reason this README exists: **no code
+change fixes this.** The rejection happens before the request is read, so there
+is no header, client library or setting that helps.
+
+What works is changing **where the request originates**. The app runs on a BDIX
+VPS in Bangladesh, and that is the entire reason the hosting choice is not
+negotiable.
+
+> A working Python reference implementation of the same approach lives in
+> `../python`. It exists as evidence and as a second opinion when the portal's
+> markup changes — it is not part of this service and this backend never calls
+> it.
+
+## The API URL is frozen in the app
+
+The mobile client reads `EXPO_PUBLIC_API_URL`, and Expo inlines `EXPO_PUBLIC_*`
+into the JS bundle at **build** time. The value present when `eas build` runs is
+baked into the APK/IPA; changing it afterwards needs a new build and a new store
+review. Installed copies keep pointing at the old address forever.
+
+That makes one decision load-bearing: **the production hostname must be one you
+own.** A provider-issued name works right up until you want to leave that
+provider, and this backend has already changed hosts once. With your own domain
+that move is a DNS edit. With a provider-issued subdomain it is a rebuild of an
+app that is already on people's phones.
+
+| Where | `EXPO_PUBLIC_API_URL` | Notes |
+|---|---|---|
+| Simulator / emulator | `http://localhost:4000/api/v1` | Backend's default bind covers it |
+| Real phone, same Wi-Fi | `http://<LAN-IP>:4000/api/v1` | `localhost` on a phone means the phone |
+| Production | `https://api.yourdomain.com/api/v1` | HTTPS is required — iOS ATS blocks plaintext in release builds |
+
+Local development needs nothing special: a Bangladeshi connection reaches the
+NESCO endpoints directly, so `yarn start:dev` is enough.
+
+Check any of them with:
 
 ```bash
-$ yarn install
+curl https://api.yourdomain.com/api/v1/health
+# {"status":"ok","database":"up","uptimeSeconds":3600}
 ```
 
-## Compile and run the project
+`uptimeSeconds` is the field worth watching: a value that keeps resetting means
+the process manager is restarting a process that dies on startup, which a plain
+up/down check reports as healthy.
+
+## Setup
 
 ```bash
-# development
-$ yarn run start
-
-# watch mode
-$ yarn run start:dev
-
-# production mode
-$ yarn run start:prod
+yarn install
+cp .env.example .env      # then fill it in
+yarn build
 ```
 
-## Run tests
+`.env` is validated at boot by `src/config/env.validation.ts` — the app refuses
+to start on an incomplete configuration rather than failing on the first request
+that needs a missing value.
+
+There is no `HOST` setting. The app always binds every interface, which is what
+the VPS needs: traffic arrives on the host's external address, so the only other
+plausible value — a loopback bind — would make the API unreachable rather than
+more private.
+
+## Running
 
 ```bash
-# unit tests
-$ yarn run test
-
-# e2e tests
-$ yarn run test:e2e
-
-# test coverage
-$ yarn run test:cov
+yarn build
+yarn start:prod     # node dist/main
 ```
 
-## Resources
+`start:prod` runs the compiled output, so `yarn build` after every change.
 
-Check out a few resources that may come in handy when working with NestJS:
+Keeping it running across crashes and reboots is the host's job — systemd, pm2,
+or whatever already supervises services on the VPS. None of that is committed
+here, because the deployment host is outside this repository's concern except
+for the one constraint that is not negotiable: **it must be in Bangladesh.**
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+### Hostname and CORS
 
-## Support
+Add the production hostname to `CORS_ORIGINS` if anything browser-based will
+call it. Native Expo builds send no `Origin` header and are unaffected.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+TLS is not optional for the mobile app: iOS ATS blocks plaintext in release
+builds, so serve the API over HTTPS before pointing a build at it.
 
-## Stay in touch
+### The alerts sweep needs the process alive
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+`ALERTS_CRON` (default `0 */6 * * *`) polls every saved meter and sends
+low-balance notifications. The schedule lives inside the process, so a sweep due
+while the app is down simply does not happen — it is not queued and does not
+catch up. That is the practical argument for a supervised service rather than a
+hand-started one, and for watching `uptimeSeconds` on `/health`.
 
-## License
+## Development
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+```bash
+yarn start:dev     # watch mode
+yarn test          # unit tests
+yarn test:cov      # coverage
+yarn lint
+```
+
+Local development on a Bangladeshi connection reaches the NESCO endpoints
+directly, which is the whole point.
+
+```bash
+yarn db:generate   # drizzle migrations from schema changes
+yarn db:migrate
+yarn db:studio
+```
+
+Swagger is served at `/docs` — `SwaggerModule.setup` is not affected by
+`setGlobalPrefix`, so it sits outside the `api/v1` prefix the routes use.

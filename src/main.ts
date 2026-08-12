@@ -9,6 +9,17 @@ import { Logger } from '@nestjs/common';
 
 const logger = new Logger('Mohajon');
 
+/**
+ * Bind every interface, and deliberately not from configuration.
+ *
+ * Traffic reaches the VPS on its external address, so the only other plausible
+ * value is a loopback bind — which makes the API unreachable rather than more
+ * private, and fails in a way that looks like a network fault instead of a
+ * config line. A setting whose every non-default value is wrong here is worse
+ * than a constant.
+ */
+const HOST = '0.0.0.0';
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
@@ -27,13 +38,13 @@ async function bootstrap() {
 
   setupSwagger(app);
   const port = configService.getOrThrow<number>('PORT');
-  await app.listen(port);
+  await app.listen(port, HOST);
 
-  return { url: await app.getUrl(), port };
+  return { url: await app.getUrl(), port, host: HOST };
 }
 
 void bootstrap()
-  .then(({ url, port }) =>
-    logger.log(`Server is running at port ${port}: ${url}`),
+  .then(({ url, port, host }) =>
+    logger.log(`Server is running on ${host}:${port}: ${url}`),
   )
   .catch((err) => logger.error('Failed to start the server!', err));

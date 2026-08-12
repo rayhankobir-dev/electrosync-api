@@ -71,7 +71,9 @@ describe('rejectionFor', () => {
   });
 
   it('allows the last permitted attempt', () => {
-    expect(rejectionFor(record({ attempts: MAX_ATTEMPTS - 1 }), NOW)).toBeNull();
+    expect(
+      rejectionFor(record({ attempts: MAX_ATTEMPTS - 1 }), NOW),
+    ).toBeNull();
   });
 
   it('rejects once the attempt ceiling is reached', () => {

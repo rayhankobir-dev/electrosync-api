@@ -1,10 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance } from 'axios';
 import * as cheerio from 'cheerio';
-import type { Agent } from 'node:http';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 
 import {
   NESCO_BASE_URL,
@@ -27,75 +23,6 @@ import { NescoPortalError } from './nesco.errors';
  */
 type ExchangeStage = 'session GET' | 'report POST';
 
-/** One way out to the portal: an axios instance plus how to name it in a log. */
-interface PortalRoute {
-  /** Credential-free rendering of the proxy, or absent for a direct route. */
-  readonly description?: string;
-  readonly http: AxiosInstance;
-}
-
-/**
- * Splits `NESCO_PROXY_URL` into individual proxies.
- *
- * A comma-separated list rather than a single value because the free
- * Bangladeshi proxies this is most likely to be pointed at are individually
- * unreliable — each is up roughly half the time — but they fail independently.
- * Trying several in turn is what makes them usable at all. A single value is
- * still valid and behaves exactly as before.
- */
-function parseProxyList(value: string | undefined): string[] {
-  if (!value) return [];
-
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-/**
- * Whether a failure justifies re-running the exchange on the next route.
- *
- * The distinction that matters is "this hop is broken" versus "the portal
- * answered". A dead proxy, a timeout, or the 403 the portal serves to foreign
- * addresses all mean the egress is wrong and another might work. A page whose
- * markup we cannot read is included because a failing proxy commonly answers
- * with its own error page rather than the portal's HTML — but not a customer
- * lookup that came back empty, which is a real answer and identical on every
- * route.
- */
-function isRetryableAcrossRoutes(error: unknown): boolean {
-  if (!(error instanceof NescoPortalError)) return false;
-
-  return (
-    error.reason === 'UPSTREAM_UNREACHABLE' ||
-    error.reason === 'UPSTREAM_TIMEOUT' ||
-    error.reason === 'UPSTREAM_ERROR' ||
-    error.reason === 'LAYOUT_CHANGED'
-  );
-}
-
-/**
- * Strips any userinfo from a proxy URL before it reaches a log line.
- *
- * A proxy URL routinely carries `user:password@`, and both the boot message and
- * the constructor's error paths would otherwise write those credentials to a
- * log aggregator in plaintext. Falls back to the scheme alone when the value is
- * too malformed to parse — that is exactly the case being reported, so it must
- * not itself throw.
- */
-function redactCredentials(proxyUrl: string): string {
-  try {
-    const url = new URL(proxyUrl);
-    if (url.username || url.password) {
-      url.username = '***';
-      url.password = '';
-    }
-    return url.toString();
-  } catch {
-    return `${proxyUrl.split('://', 1)[0]}://<unparseable>`;
-  }
-}
-
 /**
  * Owns the conversation with the NESCO portal and nothing else: it returns raw
  * HTML and never interprets it.
@@ -105,6 +32,24 @@ function redactCredentials(proxyUrl: string): string {
  * with both. Because the token is bound to that session, the two requests
  * cannot be cached or split apart.
  *
+ * ## This class deliberately has no egress configuration
+ *
+ * customer.nesco.gov.bd refuses requests by **source IP**: every address
+ * outside Bangladesh gets a bare HTTP 403 with a zero-length body, the opening
+ * GET included, so no session is ever established. That was confirmed by
+ * elimination rather than assumed — browser headers, a Chrome TLS fingerprint
+ * (JA3), a Mumbai-region deployment and the site root were each tried and each
+ * returned a byte-identical 403, while the same code from a Bangladeshi ISP
+ * returns 200 with any User-Agent or none at all.
+ *
+ * Two consequences follow, and they are why this file looks the way it does:
+ *
+ * 1. No header, fingerprint or client library can fix it. The rejection happens
+ *    before the request is read.
+ * 2. The only thing that works is changing **where the process runs**. The
+ *    backend must originate its traffic from a Bangladeshi connection, which is
+ *    a deployment concern rather than a code one — see `README.md`.
+ *
  * Note that the customer number is a per-call argument rather than constructor
  * state (as it was in the original script). That is what allows this to be a
  * singleton provider instead of an object rebuilt on every request.
@@ -112,162 +57,29 @@ function redactCredentials(proxyUrl: string): string {
 @Injectable()
 export class NescoPortalClient {
   private readonly logger = new Logger(NescoPortalClient.name);
-  /** Egress options, tried in order. Always at least one entry. */
-  private readonly routes: readonly PortalRoute[];
 
   /**
-   * Where the next lookup starts. Sticky on the last route that answered.
+   * One instance for the whole app, and one for both legs of every exchange.
    *
-   * Without this, a dead entry ahead of a working one is re-dialled on every
-   * lookup and each retry costs a full connect timeout first — measured at
-   * ~15s per dead entry against real proxies, on every single request. Sticking
-   * to what last worked keeps the steady state at one attempt, and the list
-   * still gets walked the moment that route stops answering.
+   * Sharing it is not merely an optimisation: the CSRF token and session cookie
+   * minted by the GET are bound to the address the portal saw, so the POST has
+   * to leave from the same place.
    */
-  private preferredRoute = 0;
+  private readonly http: AxiosInstance = axios.create({
+    timeout: NESCO_REQUEST_TIMEOUT_MS,
+    responseType: 'text',
+    headers: { 'User-Agent': NESCO_USER_AGENT },
+    // The portal returns HTML for every outcome, so let non-2xx surface as a
+    // distinguishable transport failure rather than as unparseable markup.
+    validateStatus: (status) => status >= 200 && status < 300,
+  });
 
-  constructor(private readonly config: ConfigService) {
-    const proxyUrls = parseProxyList(
-      this.config.get<string>('NESCO_PROXY_URL'),
-    );
-
-    this.routes =
-      proxyUrls.length > 0
-        ? proxyUrls.map((proxyUrl) => ({
-            description: redactCredentials(proxyUrl),
-            http: this.createHttp(this.createProxyAgent(proxyUrl)),
-          }))
-        : [{ http: this.createHttp(undefined) }];
-
-    if (proxyUrls.length > 0) {
-      this.logger.log(
-        `Portal requests routed via ${this.routes.length} proxy route(s): ${this.routes
-          .map((route) => route.description)
-          .join(', ')}`,
-      );
-    }
-  }
-
-  private createHttp(agent: Agent | undefined): AxiosInstance {
-    return axios.create({
-      timeout: NESCO_REQUEST_TIMEOUT_MS,
-      responseType: 'text',
-      headers: { 'User-Agent': NESCO_USER_AGENT },
-      // The portal returns HTML for every outcome, so let non-2xx surface as a
-      // distinguishable transport failure rather than as unparseable markup.
-      validateStatus: (status) => status >= 200 && status < 300,
-      // One axios instance per route, with the agent bound to the instance, is
-      // what keeps BOTH legs of an exchange on the same egress. The session
-      // cookie and CSRF token minted by the GET are bound to the address the
-      // portal saw; sending the POST from another one loses the session.
-      ...(agent
-        ? { httpAgent: agent, httpsAgent: agent, proxy: false as const }
-        : {}),
-    });
-  }
-
-  /**
-   * Builds the outbound agent for `NESCO_PROXY_URL`.
-   *
-   * The portal answers HTTP 403 to every source IP outside Bangladesh — the GET
-   * that opens the session included, so nothing works from a foreign host.
-   * Confirmed against 18 vantage points in 14 countries: all 403, while a
-   * Bangladeshi IP gets 200 with any User-Agent, including none at all. A
-   * backend hosted abroad therefore needs Bangladeshi egress, and this is the
-   * seam where that is attached.
-   *
-   * Throwing on a bad value is deliberate: Nest instantiates providers at boot,
-   * so a typo here stops the app with a legible message instead of turning into
-   * the same opaque 502 this exists to prevent.
-   */
-  private createProxyAgent(proxyUrl: string): Agent {
-    let protocol: string;
-
-    try {
-      protocol = new URL(proxyUrl).protocol;
-    } catch {
-      throw new Error(
-        `NESCO_PROXY_URL is not a valid URL: ${redactCredentials(proxyUrl)}`,
-      );
-    }
-
-    switch (protocol) {
-      // `ssh -D 1080 user@bd-host` is the cheapest working egress and speaks
-      // SOCKS5, so this is the scheme most deployments will actually use.
-      case 'socks:':
-      case 'socks4:':
-      case 'socks4a:':
-      case 'socks5:':
-      case 'socks5h:':
-        return new SocksProxyAgent(proxyUrl);
-
-      // `HttpsProxyAgent`, not `HttpProxyAgent`: the agent is named for the
-      // protocol of the destination (https://customer.nesco.gov.bd), which it
-      // reaches by CONNECT-tunnelling through the proxy. `HttpProxyAgent` would
-      // try to send the request in absolute-URI form and never negotiate TLS.
-      case 'http:':
-      case 'https:':
-        return new HttpsProxyAgent(proxyUrl);
-
-      default:
-        throw new Error(
-          `NESCO_PROXY_URL has unsupported scheme "${protocol}" — expected one of http, https, socks4, socks5.`,
-        );
-    }
-  }
-
-  /**
-   * Runs the GET-then-POST exchange and returns the report page's HTML,
-   * falling forward through the configured egress routes.
-   *
-   * Failover is per *exchange*, never per request. Retrying just the POST on
-   * another route would present a CSRF token minted for a session the second
-   * route's address never opened, so a whole exchange is the smallest unit that
-   * can be retried correctly.
-   *
-   * Only transport-shaped failures move to the next route. A portal answer that
-   * merely has no data in it is a real answer and must not burn the whole list.
-   */
+  /** Runs the GET-then-POST exchange and returns the report page's HTML. */
   async fetchReport(
     customerNumber: string,
     submitType: SubmitType,
   ): Promise<string> {
-    let lastError: unknown;
-    const total = this.routes.length;
-
-    for (let attempt = 0; attempt < total; attempt += 1) {
-      const index = (this.preferredRoute + attempt) % total;
-      const route = this.routes[index];
-
-      try {
-        const html = await this.fetchVia(route, customerNumber, submitType);
-        this.preferredRoute = index;
-        return html;
-      } catch (error) {
-        lastError = error;
-
-        if (attempt === total - 1 || !isRetryableAcrossRoutes(error)) {
-          throw error;
-        }
-
-        this.logger.warn(
-          `Egress ${route.description ?? 'direct'} failed (${
-            (error as Error).message
-          }); trying next route`,
-        );
-      }
-    }
-
-    throw lastError;
-  }
-
-  /** One complete exchange over a single egress route. */
-  private async fetchVia(
-    route: PortalRoute,
-    customerNumber: string,
-    submitType: SubmitType,
-  ): Promise<string> {
-    const { csrfToken, cookieHeader } = await this.openSession(route);
+    const { csrfToken, cookieHeader } = await this.openSession();
 
     const body = new URLSearchParams({
       _token: csrfToken,
@@ -275,8 +87,8 @@ export class NescoPortalClient {
       submit: submitType,
     });
 
-    const html = await this.request(route, 'report POST', () =>
-      route.http.post<string>(NESCO_BASE_URL, body.toString(), {
+    const html = await this.request('report POST', () =>
+      this.http.post<string>(NESCO_BASE_URL, body.toString(), {
         headers: {
           Cookie: cookieHeader,
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -292,12 +104,12 @@ export class NescoPortalClient {
   }
 
   /** GETs the panel to obtain a CSRF token bound to a fresh session cookie. */
-  private async openSession(route: PortalRoute): Promise<{
+  private async openSession(): Promise<{
     csrfToken: string;
     cookieHeader: string;
   }> {
-    const response = await this.requestRaw(route, 'session GET', () =>
-      route.http.get<string>(NESCO_BASE_URL),
+    const response = await this.requestRaw('session GET', () =>
+      this.http.get<string>(NESCO_BASE_URL),
     );
 
     const $ = cheerio.load(this.asHtml(response.data));
@@ -339,11 +151,10 @@ export class NescoPortalClient {
   }
 
   private async request(
-    route: PortalRoute,
     stage: ExchangeStage,
     send: () => Promise<{ data: unknown }>,
   ): Promise<string> {
-    const response = await this.requestRaw(route, stage, send);
+    const response = await this.requestRaw(stage, send);
     return this.asHtml(response.data);
   }
 
@@ -352,7 +163,6 @@ export class NescoPortalClient {
    * `NescoPortalError`. Callers upstream never need to know axios exists.
    */
   private async requestRaw<T extends { data: unknown }>(
-    route: PortalRoute,
     stage: ExchangeStage,
     send: () => Promise<T>,
   ): Promise<T> {
@@ -371,14 +181,14 @@ export class NescoPortalClient {
         if (error.response) {
           throw new NescoPortalError(
             'UPSTREAM_ERROR',
-            `The NESCO portal responded with HTTP ${error.response.status} to the ${stage}`,
+            `The NESCO portal responded with HTTP ${error.response.status} to the ${stage}${this.hintForStatus(error.response.status)}`,
             error,
           );
         }
 
         throw new NescoPortalError(
           'UPSTREAM_UNREACHABLE',
-          `The NESCO portal could not be reached on the ${stage} (${this.describeTransportFailure(error, route)})`,
+          `The NESCO portal could not be reached on the ${stage} (${this.describeTransportFailure(error)})`,
           error,
         );
       }
@@ -388,23 +198,34 @@ export class NescoPortalClient {
   }
 
   /**
+   * Appends the one diagnosis a status code cannot carry on its own.
+   *
+   * A 403 here has exactly one known cause, and it is not the one an operator
+   * reaches for first. Without this sentence the log line invites a hunt through
+   * headers and user agents — the search that has already been run, and that
+   * ends nowhere. Naming it inline is what turns a recurring investigation into
+   * a one-line answer.
+   */
+  private hintForStatus(status: number): string {
+    if (status !== 403) return '';
+
+    return (
+      ' — the portal serves 403 to every source IP outside Bangladesh, so this' +
+      ' host is almost certainly running abroad. See README.md: no header,' +
+      ' fingerprint or client setting fixes this, only where the process runs.'
+    );
+  }
+
+  /**
    * Renders a connection failure into something an operator can act on.
    *
    * `error.code` alone is not enough. Node sets it for its own socket errors
-   * (ECONNREFUSED, ENOTFOUND), but a SOCKS handshake rejected by the proxy
-   * arrives as a plain `Error` with a descriptive message and no code at all —
-   * so keying on the code collapsed every proxy misconfiguration into the
-   * single useless string "unknown error".
-   *
-   * Naming the proxy matters just as much. Once traffic is tunnelled there are
-   * two hops that can fail and the reason reads `UPSTREAM_UNREACHABLE` for
-   * both, even though "your proxy refused the connection" and "the portal is
-   * down" call for opposite responses.
+   * (ECONNREFUSED, ENOTFOUND), but errors raised by an outbound agent or a TLS
+   * layer commonly arrive as a plain `Error` with a descriptive message and no
+   * code at all — so keying on the code collapsed a whole family of
+   * misconfigurations into the single useless string "unknown error".
    */
-  private describeTransportFailure(
-    error: AxiosError,
-    route: PortalRoute,
-  ): string {
+  private describeTransportFailure(error: AxiosError): string {
     const seen = new Set<string>();
     const parts: string[] = [];
 
@@ -419,7 +240,7 @@ export class NescoPortalClient {
     add(error.code);
 
     // Walk the cause chain: the actionable detail is often one level down,
-    // where axios has wrapped the agent's error in a generic message. Bounded
+    // where axios has wrapped a lower-level error in a generic message. Bounded
     // because `cause` is attacker-agnostic but not guaranteed acyclic.
     let current: unknown = error;
     for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
@@ -428,7 +249,6 @@ export class NescoPortalClient {
     }
 
     if (parts.length === 0) add('unknown error');
-    if (route.description) add(`via proxy ${route.description}`);
 
     return parts.join('; ');
   }

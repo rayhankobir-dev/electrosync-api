@@ -32,7 +32,11 @@ function flatDays(count: number, cost: number): DailyCost[] {
 }
 
 /** A flat baseline with the final day replaced by a spike. */
-function withSpike(count: number, baseline: number, spike: number): DailyCost[] {
+function withSpike(
+  count: number,
+  baseline: number,
+  spike: number,
+): DailyCost[] {
   const days = flatDays(count, baseline);
   days[days.length - 1] = { ...days[days.length - 1], consumedCost: spike };
   return days;

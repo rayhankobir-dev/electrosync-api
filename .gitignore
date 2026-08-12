@@ -3,9 +3,10 @@
 /node_modules
 /build
 /drizzle
+firebase.json
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 pnpm-debug.log*

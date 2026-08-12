@@ -1,7 +1,4 @@
-import {
-  USAGE_ANOMALY,
-  type UsageAnomaly,
-} from '@/database/types/usage.type';
+import { USAGE_ANOMALY, type UsageAnomaly } from '@/database/types/usage.type';
 import { type NescoRechargeDto } from '@/modules/nesco/dto/nesco-response.dto';
 
 /** Balances below this apart are floating-point noise, not a real movement. */

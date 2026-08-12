@@ -300,9 +300,7 @@ export const meterUsageSample = pgTable(
      * paid would over-credit the balance and understate consumption by the
      * difference, which on a ৳500 top-up is around ৳100.
      */
-    rechargeCredited: doublePrecision('recharge_credited')
-      .notNull()
-      .default(0),
+    rechargeCredited: doublePrecision('recharge_credited').notNull().default(0),
     /** Gross `rechargeAmount` paid — what the user reports as "spent". */
     rechargePaid: doublePrecision('recharge_paid').notNull().default(0),
     /** Never negative. Zeroed when `anomaly` says the reading was unusable. */

@@ -10,6 +10,7 @@ import { UserModule } from '@/modules/user/user.module';
 import { MeterModule } from '@/modules/meter/meter.module';
 import { NescoModule } from '@/modules/nesco/nesco.module';
 import { DatabaseModule } from '@/database/database.module';
+import { HealthModule } from '@/modules/health/health.module';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
 import { NotificationModule } from '@/modules/notification/notification.module';
 
@@ -20,6 +21,7 @@ import { NotificationModule } from '@/modules/notification/notification.module';
       validate: validateEnv,
     }),
     DatabaseModule,
+    HealthModule,
     AuthModule,
     UserModule,
     MeterModule,

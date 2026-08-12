@@ -5,6 +5,12 @@
     "test",
     "dist",
     "**/*spec.ts",
-    "drizzle.config.ts"
+    "drizzle.config.ts",
+    // Ad-hoc verification scripts kept at the project root. Excluding them is
+    // not only tidiness: TypeScript infers rootDir from the common ancestor of
+    // every included file, so one root-level file moves the whole output from
+    // dist/ down to dist/src/ — silently, with the build still reporting
+    // success — and `start:prod` ("node dist/main") stops resolving.
+    "**/*.tmp.ts"
   ]
 }

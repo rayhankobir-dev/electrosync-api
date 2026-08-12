@@ -12,6 +12,7 @@ import {
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCreatedResponse,
+  ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -28,6 +29,7 @@ import {
   PublicKeyDto,
   UserProfileDto,
 } from './dto/auth-response.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -109,6 +111,32 @@ export class AuthController {
   @ApiOkResponse({ type: PublicKeyDto })
   publicKey(): PublicKeyDto {
     return { algorithm: 'RS256', publicKey: this.tokens.publicKey() };
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Change your password, proving the current one.',
+    description:
+      'For a user who is already signed in — `/auth/forgot-password` covers the ' +
+      'case where the current password is unknown. Tokens issued before the ' +
+      'change stay valid until they expire, this one included, so the caller is ' +
+      'not signed out and neither is any other device.',
+  })
+  @ApiNoContentResponse({ description: 'Password changed. No body.' })
+  @ApiBadRequestResponse({
+    description:
+      'The current password is wrong, the new one repeats it, or the account has ' +
+      'no password to change. A wrong current password is reported here rather ' +
+      'than as a 401 so that a typo cannot be mistaken for an expired session.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid token.' })
+  changePassword(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<void> {
+    return this.auth.changePassword(user.id, dto);
   }
 
   @Get('me')

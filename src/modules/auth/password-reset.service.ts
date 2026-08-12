@@ -79,7 +79,9 @@ export class PasswordResetService {
       // Logged, because "no email arrived" is the most common support report
       // this flow will generate and the server is the only place that knows
       // which of the two reasons applied.
-      this.logger.log(`Reset requested for unknown email ${email} — no mail sent`);
+      this.logger.log(
+        `Reset requested for unknown email ${email} — no mail sent`,
+      );
       return;
     }
 

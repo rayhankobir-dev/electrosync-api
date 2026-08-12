@@ -1,4 +1,8 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, type Transporter } from 'nodemailer';
 
@@ -53,7 +57,9 @@ export class MailService {
       ...(user && password ? { auth: { user, pass: password } } : {}),
     });
 
-    this.logger.log(`SMTP ready: ${host}:${this.config.get<number>('SMTP_PORT')}`);
+    this.logger.log(
+      `SMTP ready: ${host}:${this.config.get<number>('SMTP_PORT')}`,
+    );
   }
 
   /**

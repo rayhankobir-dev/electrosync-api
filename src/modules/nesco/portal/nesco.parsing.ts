@@ -136,8 +136,8 @@ function dhakaTimeToEpochSeconds(
   return Math.floor(epochMs / 1000);
 }
 
-/** Parses the meter installation stamp: `dd/MM/yyyy HH:mm:ss` (time optional). */
-export function parseInstallationDate(raw: string): number {
+/** Parses a slash-separated stamp: `dd/MM/yyyy HH:mm:ss` (time optional). */
+function parseSlashDateTime(raw: string, field: string): number {
   const match =
     /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(
       toAsciiDigits(raw).trim(),
@@ -145,7 +145,7 @@ export function parseInstallationDate(raw: string): number {
 
   if (!match) {
     throw layoutError(
-      `Expected meter installation date as "dd/MM/yyyy HH:mm:ss" but received "${raw}"`,
+      `Expected "${field}" as "dd/MM/yyyy HH:mm:ss" but received "${raw}"`,
     );
   }
 
@@ -160,9 +160,14 @@ export function parseInstallationDate(raw: string): number {
       minute: Number(minute ?? '0'),
       second: Number(second ?? '0'),
     },
-    'meterInstalledAt',
+    field,
     raw,
   );
+}
+
+/** Parses the meter installation stamp: `dd/MM/yyyy HH:mm:ss` (time optional). */
+export function parseInstallationDate(raw: string): number {
+  return parseSlashDateTime(raw, 'meterInstalledAt');
 }
 
 /** Parses a recharge stamp: `dd-MMM-yyyy hh:mm AM|PM`. */
@@ -233,29 +238,38 @@ export function extractLabelledInputs(
 }
 
 /**
- * Looks a label up by exact match, falling back to prefix match.
+ * Looks a label up by exact match, falling back to prefix match, and returns
+ * the label as the portal actually spelled it alongside its value.
  *
  * The balance label carries a trailing "as of <timestamp>" suffix that changes
- * on every request, so an exact-only lookup would never find it.
+ * on every request, so an exact-only lookup would never find it — and that
+ * suffix is itself data, which is why the matched key comes back too.
  */
-function requireLabelled(
+function requireLabelledEntry(
   values: ReadonlyMap<string, string>,
   label: string,
-): string {
+): { key: string; value: string } {
   const target = normalizeText(label);
 
   const exact = values.get(target);
   if (exact !== undefined) {
-    return exact;
+    return { key: target, value: exact };
   }
 
   for (const [key, value] of values) {
     if (key.startsWith(target)) {
-      return value;
+      return { key, value };
     }
   }
 
   throw layoutError(`Customer detail form has no field labelled "${label}"`);
+}
+
+function requireLabelled(
+  values: ReadonlyMap<string, string>,
+  label: string,
+): string {
+  return requireLabelledEntry(values, label).value;
 }
 
 export interface PortalTable {
@@ -335,6 +349,7 @@ export function parseCustomerInfo(
   }
 
   const installedAt = requireLabelled(values, LABEL.METER_INSTALLED_AT);
+  const balance = requireLabelledEntry(values, LABEL.BALANCE);
 
   return {
     consumerNo: customerNumber,
@@ -354,14 +369,51 @@ export function parseCustomerInfo(
       requireLabelled(values, LABEL.MIN_RECHARGE),
       'minimumRecharge',
     ),
-    currentBalance: parseAmount(
-      requireLabelled(values, LABEL.BALANCE),
-      'currentBalance',
-    ),
+    currentBalance: parseAmount(balance.value, 'currentBalance'),
+    balanceAsOf: parseBalanceAsOf(balance.key),
   };
 }
 
-export function parseBalance(html: string, customerNumber: string): number {
+export interface PortalBalance {
+  readonly balance: number;
+  /**
+   * Unix epoch seconds of the stamp the portal prints beside the balance label,
+   * or null when the label carries none.
+   *
+   * This is the balance's *validity* time, not our observation time. NESCO
+   * settles meter balances in a batch and publishes the result stamped with the
+   * instant it covers, so consecutive stamps bound exactly one settlement
+   * period — the only honest window to attribute consumption to.
+   */
+  readonly asOf: number | null;
+}
+
+/**
+ * Pulls the settlement stamp out of a balance label.
+ *
+ * The one place in this file that does *not* treat an unparseable value as a
+ * layout change. The rule earns its exception here because the stamp rides on
+ * the same field as the balance: raising would take down the balance too, and
+ * with it every alert, the home screen and the sweep — to protect a figure that
+ * only improves attribution. So a stamp we cannot read is reported as absent,
+ * and `resolveReadingInstant` marks the reading estimated, which the sweep logs.
+ * Accuracy degrades loudly; nothing breaks.
+ */
+function parseBalanceAsOf(label: string): number | null {
+  const stamp = /\(([^)]*)\)\s*$/.exec(label);
+  if (!stamp) return null;
+
+  try {
+    return parseSlashDateTime(stamp[1], 'balanceAsOf');
+  } catch {
+    return null;
+  }
+}
+
+export function parseBalance(
+  html: string,
+  customerNumber: string,
+): PortalBalance {
   const values = extractLabelledInputs(html);
 
   if (values.size === 0) {
@@ -371,7 +423,12 @@ export function parseBalance(html: string, customerNumber: string): number {
     );
   }
 
-  return parseAmount(requireLabelled(values, LABEL.BALANCE), 'balance');
+  const entry = requireLabelledEntry(values, LABEL.BALANCE);
+
+  return {
+    balance: parseAmount(entry.value, 'balance'),
+    asOf: parseBalanceAsOf(entry.key),
+  };
 }
 
 export function parseRechargeHistory(html: string): NescoRechargeDto[] {

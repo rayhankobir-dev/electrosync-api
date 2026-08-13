@@ -5,6 +5,8 @@ import {
   RECHARGE_HISTORY_PAGE,
   RENAMED_COLUMN_PAGE,
   UNKNOWN_CUSTOMER_PAGE,
+  UNREADABLE_STAMP_PAGE,
+  UNSTAMPED_BALANCE_PAGE,
 } from './__fixtures__/nesco-pages';
 import { NescoPortalError } from './nesco.errors';
 import {
@@ -124,11 +126,41 @@ describe('parseCustomerInfo', () => {
       approvedLoad: 2,
       minimumRecharge: 200,
       currentBalance: 1523.45,
+      balanceAsOf: 1738296000,
     });
   });
 
   it('finds the balance despite its changing timestamp suffix', () => {
-    expect(parseBalance(RECHARGE_HISTORY_PAGE, CUSTOMER_NO)).toBe(1523.45);
+    expect(parseBalance(RECHARGE_HISTORY_PAGE, CUSTOMER_NO).balance).toBe(
+      1523.45,
+    );
+  });
+
+  it('reads the settlement stamp out of the balance label', () => {
+    // "অবশিষ্ট ব্যালেন্স (৩১/০১/২০২৫ ১০:০০)" — 31 Jan 2025 10:00 Bangladesh
+    // time. The portal publishes the balance in batches and stamps the label
+    // with the instant it settles, which is the only period boundary we get.
+    expect(parseBalance(RECHARGE_HISTORY_PAGE, CUSTOMER_NO).asOf).toBe(
+      1738296000,
+    );
+  });
+
+  it('reports a missing stamp as absent rather than failing the read', () => {
+    expect(parseBalance(UNSTAMPED_BALANCE_PAGE, CUSTOMER_NO)).toEqual({
+      balance: 1523.45,
+      asOf: null,
+    });
+  });
+
+  it('keeps the balance readable when the stamp format is unrecognised', () => {
+    // The fixture's stamp format is our best reading of the portal, not a
+    // capture of it. If the real page words it differently, losing the stamp
+    // must cost us attribution accuracy — which the sweep logs — and not the
+    // balance itself, which every alert and the home screen depend on.
+    expect(parseBalance(UNREADABLE_STAMP_PAGE, CUSTOMER_NO)).toEqual({
+      balance: 1523.45,
+      asOf: null,
+    });
   });
 
   it('reports an unknown customer rather than an empty record', () => {

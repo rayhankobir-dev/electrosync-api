@@ -27,6 +27,11 @@ import {
 /** Balance plus recharge history, read from one fetch of the same page. */
 export interface NescoSnapshot {
   readonly balance: number;
+  /**
+   * When the portal settled `balance`, Unix epoch seconds — its validity time,
+   * not our observation time. Null when the portal omitted the stamp.
+   */
+  readonly balanceAsOf: number | null;
   readonly recharges: NescoRechargeDto[];
 }
 
@@ -50,9 +55,12 @@ export class NescoService {
         SUBMIT_TYPE.RECHARGE_HISTORY,
       );
 
+      const balance = parseBalance(html, customerNo);
+
       return {
         consumerNo: customerNo,
-        balance: parseBalance(html, customerNo),
+        balance: balance.balance,
+        balanceAsOf: balance.asOf,
       };
     });
   }
@@ -89,8 +97,11 @@ export class NescoService {
         SUBMIT_TYPE.RECHARGE_HISTORY,
       );
 
+      const balance = parseBalance(html, customerNo);
+
       return {
-        balance: parseBalance(html, customerNo),
+        balance: balance.balance,
+        balanceAsOf: balance.asOf,
         recharges: parseRechargeHistory(html),
       };
     });

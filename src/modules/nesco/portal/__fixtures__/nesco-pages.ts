@@ -159,3 +159,22 @@ export const PRECOMPOSED_HEADING_PAGE = page(
 export const NON_NUMERIC_BALANCE_PAGE = page(
   CUSTOMER_FORM.replace('value="1,523.45"', 'value="প্রযোজ্য নয়"'),
 );
+
+/**
+ * A detail form whose balance label carries no "as of" stamp.
+ *
+ * The stamp is the only evidence of which period a balance settles, so its
+ * absence has to be survivable rather than fatal — the balance itself is still
+ * a usable reading.
+ */
+export const UNSTAMPED_BALANCE_PAGE = page(
+  CUSTOMER_FORM.replace(
+    'অবশিষ্ট ব্যালেন্স (৩১/০১/২০২৫ ১০:০০)',
+    'অবশিষ্ট ব্যালেন্স',
+  ),
+);
+
+/** A detail form whose "as of" stamp has stopped being a date. */
+export const UNREADABLE_STAMP_PAGE = page(
+  CUSTOMER_FORM.replace('৩১/০১/২০২৫ ১০:০০', 'হালনাগাদ হয়নি'),
+);

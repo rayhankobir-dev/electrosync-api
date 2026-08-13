@@ -9,8 +9,79 @@ import {
   Matches,
   Max,
   Min,
+  Validate,
+  ValidatorConstraint,
+  type ValidatorConstraintInterface,
   validateSync,
 } from 'class-validator';
+import { CronTime } from 'cron';
+
+/** Tighter than this and we are hammering a public portal, not polling it. */
+const MIN_SWEEP_GAP_MINUTES = 5;
+
+/**
+ * Wider than this and the balance on screen is more than a day stale, which is
+ * also where `USAGE_MAX_WINDOW_HOURS` starts flagging samples.
+ */
+const MAX_SWEEP_GAP_MINUTES = 24 * 60;
+
+/** Firings compared; enough to see the pattern of an uneven schedule. */
+const SWEEP_GAP_SAMPLES = 6;
+
+/**
+ * Validates what a schedule *means*, not what it looks like.
+ *
+ * A shape check ("five fields separated by spaces") passes `* * 6 * *`, which
+ * reads as "every minute on the 6th of the month" — weeks of no sweeps, then
+ * 1440 portal scrapes in a day. Both halves of that are outages, and neither is
+ * visible in the string. So the expression is handed to the same parser the
+ * scheduler uses and the resulting intervals are checked for sanity.
+ */
+@ValidatorConstraint({ name: 'isSweepSchedule' })
+class IsSweepSchedule implements ValidatorConstraintInterface {
+  private failure = 'is not a usable schedule';
+
+  validate(value: unknown): boolean {
+    if (typeof value !== 'string') {
+      this.failure = 'must be a string';
+      return false;
+    }
+
+    let firings: number[];
+    try {
+      firings = new CronTime(value)
+        .sendAt(SWEEP_GAP_SAMPLES)
+        .map((firing) => firing.toMillis());
+    } catch (error) {
+      this.failure = `is not a valid cron expression (${
+        error instanceof Error ? error.message : String(error)
+      })`;
+      return false;
+    }
+
+    const gaps = firings
+      .slice(1)
+      .map((firing, index) => (firing - firings[index]) / 60_000);
+
+    const tightest = Math.min(...gaps);
+    if (tightest < MIN_SWEEP_GAP_MINUTES) {
+      this.failure = `fires every ${tightest} minute(s), which would hammer the portal`;
+      return false;
+    }
+
+    const widest = Math.max(...gaps);
+    if (widest > MAX_SWEEP_GAP_MINUTES) {
+      this.failure = `leaves a ${Math.round(widest / 60)} hour gap between sweeps`;
+      return false;
+    }
+
+    return true;
+  }
+
+  defaultMessage(): string {
+    return `ALERTS_CRON ${this.failure}. Expected something like "0 */6 * * *" (every six hours).`;
+  }
+}
 
 export class EnvironmentVariables {
   @IsString()
@@ -238,15 +309,12 @@ export class EnvironmentVariables {
   ALERTS_ENABLED: boolean = true;
 
   /**
-   * Standard 5-field cron expression, in the server's local timezone.
+   * Cron expression for the balance sweep, in the server's local timezone.
    * Defaults to every six hours on the hour.
    */
   @IsOptional()
   @IsString()
-  @Matches(/^(\S+\s+){4}\S+$/, {
-    message:
-      'ALERTS_CRON must be a 5-field cron expression, e.g. "0 */6 * * *" for every six hours',
-  })
+  @Validate(IsSweepSchedule)
   ALERTS_CRON: string = '0 */6 * * *';
 
   /**

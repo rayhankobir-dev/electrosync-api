@@ -20,14 +20,59 @@ export interface UsageSamplingLimits {
   readonly maxWindowHours: number;
 }
 
+export interface ReadingInstant {
+  /** The instant the balance reading describes. */
+  readonly at: Date;
+  /**
+   * True when the portal published no usable stamp and poll time stood in.
+   *
+   * Surfaced rather than swallowed: without a stamp the window degrades to
+   * "whenever the sweep happened to run", which is the guesswork the stamp
+   * exists to remove. A caller that ignores this flag is running blind.
+   */
+  readonly estimated: boolean;
+}
+
+/**
+ * Decides which instant a balance reading actually describes.
+ *
+ * NESCO settles meter balances in a batch and prints the settlement time beside
+ * the figure, so a reading's *validity* time and the time we *observed* it are
+ * different clocks — often hours apart. Consumption has to be attributed on the
+ * validity clock: two consecutive stamps bound exactly one settlement period,
+ * whereas two poll times bound nothing but our own cron schedule.
+ *
+ * A stamp dated after the poll is rejected. It would push `window_end` into the
+ * future, and the daily rollup would then bill consumption to a day that has
+ * not happened yet.
+ */
+export function resolveReadingInstant(
+  balanceAsOf: number | null,
+  polledAt: Date,
+): ReadingInstant {
+  if (balanceAsOf === null) {
+    return { at: polledAt, estimated: true };
+  }
+
+  const stamped = new Date(balanceAsOf * 1000);
+  if (stamped.getTime() > polledAt.getTime()) {
+    return { at: polledAt, estimated: true };
+  }
+
+  return { at: stamped, estimated: false };
+}
+
 export interface UsageSampleInput {
   /** Balance at the previous successful poll. */
   readonly openingBalance: number;
   /** Balance just read. */
   readonly closingBalance: number;
-  /** `meter_alert_state.last_balance_at` — when `openingBalance` was read. */
+  /**
+   * `meter_alert_state.last_balance_at` — the portal's settlement stamp for
+   * `openingBalance`, not the moment we fetched it.
+   */
   readonly windowStart: Date;
-  /** Now. */
+  /** The portal's settlement stamp for `closingBalance`. */
   readonly windowEnd: Date;
   /** Full recharge history from the same scrape; filtered to the window here. */
   readonly recharges: readonly NescoRechargeDto[];

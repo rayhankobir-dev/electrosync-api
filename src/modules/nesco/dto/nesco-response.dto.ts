@@ -12,6 +12,14 @@ export class NescoBalanceDto {
     description: 'Remaining meter balance in BDT.',
   })
   balance: number;
+
+  @ApiProperty({
+    example: 1738296000,
+    nullable: true,
+    description:
+      "When `balance` was settled by the portal, Unix epoch seconds (UTC). This is the reading's validity time, not when we fetched it. Null when the portal omitted the stamp.",
+  })
+  balanceAsOf: number | null;
 }
 
 export class NescoCustomerInfoDto {
@@ -59,6 +67,14 @@ export class NescoCustomerInfoDto {
     description: 'Remaining meter balance in BDT.',
   })
   currentBalance: number;
+
+  @ApiProperty({
+    example: 1738296000,
+    nullable: true,
+    description:
+      'When `currentBalance` was settled by the portal, Unix epoch seconds (UTC). NESCO publishes balances in a batch and stamps the figure with the instant it covers, so this is the balance\'s validity time — not when we read it. Null when the portal omitted the stamp.',
+  })
+  balanceAsOf: number | null;
 }
 
 export class NescoRechargeDto {

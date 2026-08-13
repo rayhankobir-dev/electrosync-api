@@ -3,6 +3,7 @@ import type { NescoRechargeDto } from '@/modules/nesco/dto/nesco-response.dto';
 
 import {
   buildUsageSample,
+  resolveReadingInstant,
   type UsageSampleInput,
   type UsageSamplingLimits,
 } from './usage-sampling';
@@ -264,5 +265,49 @@ describe('buildUsageSample', () => {
     );
 
     expect(sample?.rawDelta).toBe(38);
+  });
+});
+
+describe('resolveReadingInstant', () => {
+  it('prefers the portal stamp over the moment we polled', () => {
+    // NESCO settles balances in a batch and stamps the figure with the instant
+    // it covers. Poll time only records when we happened to look, so using it
+    // as a window bound spreads one batch across hours nobody measured.
+    const resolved = resolveReadingInstant(at(2).getTime() / 1000, at(9));
+
+    expect(resolved).toEqual({ at: at(2), estimated: false });
+  });
+
+  it('falls back to poll time when the portal published no stamp', () => {
+    const resolved = resolveReadingInstant(null, at(9));
+
+    expect(resolved).toEqual({ at: at(9), estimated: true });
+  });
+
+  it('refuses a stamp dated after we polled', () => {
+    // A stamp ahead of the clock would put window_end in the future, and the
+    // daily rollup would bill consumption to a day that has not happened.
+    const resolved = resolveReadingInstant(at(12).getTime() / 1000, at(9));
+
+    expect(resolved).toEqual({ at: at(9), estimated: true });
+  });
+
+  it('produces no sample at all while the stamp is unchanged', () => {
+    // Between publications the portal repeats itself. The window collapses to
+    // zero length, and a zero-length window is not a measurement.
+    const previous = resolveReadingInstant(at(2).getTime() / 1000, at(9));
+    const repeat = resolveReadingInstant(at(2).getTime() / 1000, at(17));
+
+    expect(
+      buildUsageSample(
+        input({
+          windowStart: previous.at,
+          windowEnd: repeat.at,
+          openingBalance: 108.42,
+          closingBalance: 108.42,
+        }),
+        LIMITS,
+      ),
+    ).toBeNull();
   });
 });

@@ -37,6 +37,27 @@ describe('NescoService', () => {
     expect(info.currentBalance).toBe(1523.45);
   });
 
+  it('carries the settlement stamp through the balance lookup', async () => {
+    const fetchReport = jest.fn().mockResolvedValue(RECHARGE_HISTORY_PAGE);
+
+    const balance = await serviceWith(fetchReport).getBalance(CUSTOMER_NO);
+
+    expect(balance.balance).toBe(1523.45);
+    expect(balance.balanceAsOf).toBe(1738296000);
+  });
+
+  it('carries the settlement stamp into the recharge snapshot', async () => {
+    const fetchReport = jest.fn().mockResolvedValue(RECHARGE_HISTORY_PAGE);
+
+    // The sweep derives consumption from consecutive snapshots, so the stamp
+    // has to survive this hop — without it the window falls back to poll times.
+    const snapshot =
+      await serviceWith(fetchReport).getRechargeSnapshot(CUSTOMER_NO);
+
+    expect(snapshot.balance).toBe(1523.45);
+    expect(snapshot.balanceAsOf).toBe(1738296000);
+  });
+
   it('requests the consumption report for consumption lookups', async () => {
     const fetchReport = jest.fn().mockResolvedValue(MONTHLY_CONSUMPTION_PAGE);
 

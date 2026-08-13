@@ -39,7 +39,11 @@ import {
   SWEEP_JOB_NAME,
   SWEEP_LOCK_KEY,
 } from './alerts.constants';
-import { buildUsageSample, type UsageSample } from './usage-sampling';
+import {
+  buildUsageSample,
+  resolveReadingInstant,
+  type UsageSample,
+} from './usage-sampling';
 import { composeAlert } from './alert-messages';
 import {
   INITIAL_STATE,
@@ -154,7 +158,16 @@ export class BalanceSweepService implements OnModuleInit {
     this.scheduler.addCronJob(SWEEP_JOB_NAME, job as never);
     job.start();
 
-    this.logger.log(`Meter balance sweep scheduled (${expression})`);
+    // The expression alone is not reviewable — "* * 6 * *" looks like "every
+    // six hours" and means "every minute on the 6th". Printing when it will
+    // actually next run is what lets a human catch that on the first boot after
+    // a config change, rather than a fortnight later when no sweep has run.
+    this.logger.log(
+      `Meter balance sweep scheduled (${expression}); next runs: ${job
+        .nextDates(2)
+        .map((next) => next.toISO())
+        .join(', ')}`,
+    );
   }
 
   /**
@@ -463,18 +476,29 @@ export class BalanceSweepService implements OnModuleInit {
     snapshot: NescoSnapshot,
     now: Date,
   ): Promise<void> {
+    const reading = resolveReadingInstant(snapshot.balanceAsOf, now);
+
+    if (reading.estimated) {
+      // Not fatal, but it changes what the numbers mean: without a stamp the
+      // window is bounded by our cron schedule instead of the portal's
+      // settlement period, and daily costs go back to being interpolated.
+      this.logger.warn(
+        `Meter ${row.meterId} (${row.customerNo}) reported no usable balance stamp; falling back to poll time`,
+      );
+    }
+
     const values = {
       severity,
       lastRechargeToken,
       lastBalance: snapshot.balance,
-      lastBalanceAt: now,
+      lastBalanceAt: reading.at,
       lastCheckedAt: now,
       lastFailureReason: null,
       consecutiveFailures: 0,
       updatedAt: now,
     };
 
-    const sample = this.buildSample(row, snapshot, now);
+    const sample = this.buildSample(row, snapshot, reading.at);
 
     await this.db.transaction(async (tx) => {
       if (sample) {
@@ -496,14 +520,21 @@ export class BalanceSweepService implements OnModuleInit {
   /**
    * Turns the previous reading and this one into a usage sample.
    *
+   * Both bounds are settlement instants, not poll times — see
+   * `resolveReadingInstant`. That is what makes the window describe a period the
+   * portal actually measured, and it is also the duplicate guard: between
+   * publications the stamp repeats, the window collapses to zero length, and
+   * `buildUsageSample` returns null. Polling more often therefore costs nothing
+   * in accuracy and only shortens the delay before a new figure is noticed.
+   *
    * Returns null on a meter's first successful poll: there is no earlier
    * balance to subtract from, so this pass only establishes the baseline and
-   * the next sweep produces the first real window.
+   * the next published figure produces the first real window.
    */
   private buildSample(
     row: MonitoredMeter,
     snapshot: NescoSnapshot,
-    now: Date,
+    readingAt: Date,
   ): UsageSample | null {
     if (row.lastBalance === null || row.lastBalanceAt === null) return null;
 
@@ -512,7 +543,7 @@ export class BalanceSweepService implements OnModuleInit {
         openingBalance: row.lastBalance,
         closingBalance: snapshot.balance,
         windowStart: row.lastBalanceAt,
-        windowEnd: now,
+        windowEnd: readingAt,
         recharges: snapshot.recharges,
       },
       {

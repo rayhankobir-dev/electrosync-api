@@ -225,15 +225,17 @@ export const meterAlertState = pgTable('meter_alert_state', {
     .default(ALERT_SEVERITY.OK),
   lastBalance: doublePrecision('last_balance'),
   /**
-   * When `lastBalance` was actually read — advanced only by a *successful*
-   * poll, unlike `lastCheckedAt`, which moves on every attempt including
-   * failures.
+   * The instant `lastBalance` describes — the portal's own settlement stamp,
+   * not when we fetched it. Advanced only by a *successful* poll, unlike
+   * `lastCheckedAt`, which moves on every attempt including failures.
    *
-   * The distinction exists because usage sampling chains each window off the
-   * previous reading. Anchoring on `lastCheckedAt` would label the window after
-   * a failed poll as six hours long when it really covers twelve, doubling the
-   * apparent spend rate and tripping the implausibility guard on a healthy
-   * meter.
+   * Two clocks are in play and confusing them is what made daily costs
+   * fictional: NESCO settles balances in a batch and prints the covered instant
+   * beside the figure, so consecutive stamps bound exactly one settlement
+   * period while consecutive poll times bound nothing but our cron schedule.
+   * Usage sampling chains each window off this column, which is why it holds
+   * validity time; `lastCheckedAt` holds observation time and the two are
+   * routinely hours apart.
    */
   lastBalanceAt: timestamp('last_balance_at', { withTimezone: true }),
   lastRechargeToken: text('last_recharge_token'),

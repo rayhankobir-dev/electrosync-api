@@ -160,12 +160,20 @@ export class AnalyticsService {
       ? sql`AND s.meter_id = ${query.meterId}`
       : sql``;
 
-    // The overlap inside one day, as an interval. Written once and reused for
-    // both the cost share and the coverage seconds so the two can never
-    // disagree about how much of the window landed here.
+    // How much of this day the window actually covered, as an interval. This
+    // is a genuine time question — it answers "how much of the day did we
+    // observe" — so unlike cost it is still apportioned across every day the
+    // window touches.
     const overlap = sql`(
       LEAST(b.we, d + interval '1 day') - GREATEST(b.ws, d)
     )`;
+
+    // The day a window closes on, and therefore the day everything it measured
+    // is billed to. The microsecond step keeps a window ending exactly at
+    // midnight attributed to the day it ran through, not the one it merely
+    // touched — without it three of the four daily sweeps would each emit a
+    // phantom zero-second row on the next day.
+    const closingDay = sql`date_trunc('day', b.we - interval '1 microsecond')`;
 
     const spread = sql`
       WITH bounds AS (
@@ -185,25 +193,28 @@ export class AnalyticsService {
         SELECT
           d::date AS day,
           EXTRACT(EPOCH FROM ${overlap}) AS secs,
-          b.consumed_cost
-            * EXTRACT(EPOCH FROM ${overlap})
-            / NULLIF(EXTRACT(EPOCH FROM (b.we - b.ws)), 0) AS cost,
-          -- A recharge is a point event with a known timestamp, so it is never
-          -- split. It lands whole on the day holding window_end. The
-          -- microsecond step is what keeps a window ending exactly at midnight
-          -- attributed to the day it ran through, not the one it touched.
-          CASE
-            WHEN d = date_trunc('day', b.we - interval '1 microsecond')
-            THEN b.recharge_paid
-            ELSE 0
-          END AS recharged
+          -- Consumption lands whole on the closing day rather than being
+          -- spread across the days the window crossed.
+          --
+          -- The portal publishes one figure per settlement period and says
+          -- nothing about its internal shape, so pro-rating by elapsed time
+          -- invents a distribution it never reported. NESCO settles in
+          -- batches, which routinely produces a period running from one
+          -- evening into the next morning: split, a single ৳64.26 settlement
+          -- becomes ৳32.13 on each of two days, and *both* disagree with what
+          -- the customer sees on the portal. Attributing it whole keeps every
+          -- daily figure reconcilable against the source.
+          CASE WHEN d = ${closingDay} THEN b.consumed_cost ELSE 0 END AS cost,
+          -- A recharge is a point event with a known timestamp, so it was
+          -- never split either. Same closing day, same reason.
+          CASE WHEN d = ${closingDay} THEN b.recharge_paid ELSE 0 END AS recharged
         FROM bounds b
         CROSS JOIN LATERAL generate_series(
           date_trunc('day', b.ws),
-          -- Half-open intervals: a window ending at 00:00 belongs entirely to
-          -- the previous day. Without the microsecond, three of the four daily
-          -- sweeps would each emit a phantom zero-second row on the next day.
-          date_trunc('day', b.we - interval '1 microsecond'),
+          -- Same expression the cost lands on, so the series is guaranteed to
+          -- contain the closing day and the CASE arms above can never silently
+          -- drop a window's whole cost by matching nothing.
+          ${closingDay},
           interval '1 day'
         ) AS d
         -- Clips days a straddling window pulled in from outside the request.

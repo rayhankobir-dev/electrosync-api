@@ -20,6 +20,25 @@ function labelledField(label: string, value: string): string {
     </div>`;
 }
 
+/**
+ * The balance label, copied verbatim in shape from a live portal response on
+ * 2026-08-15 (only the instant is changed):
+ *
+ *     অবশিষ্ট ব্যালেন্স (টাকা)(সময়ঃ 15 August 2026 12:00:00 AM )
+ *
+ * Every detail here is load-bearing and was guessed wrong before it was
+ * checked: there are *two* parenthesised groups, the stamp carries a `সময়ঃ`
+ * prefix, the month is an English full name rather than a number, the clock is
+ * 12-hour with a meridiem, and there is a trailing space before the closing
+ * bracket. `12:00:00 AM` is midnight — the portal settles at the start of the
+ * day, so this balance closes the day *before* it.
+ */
+const BALANCE_LABEL =
+  'অবশিষ্ট ব্যালেন্স (টাকা)(সময়ঃ 31 January 2025 10:00:00 AM )';
+
+/** The stamp text alone, for fixtures that need to corrupt just that part. */
+const BALANCE_STAMP = '31 January 2025 10:00:00 AM';
+
 /** The customer detail form, as rendered above every report. */
 const CUSTOMER_FORM = `
   <form class="bfont_post" method="post">
@@ -33,7 +52,7 @@ const CUSTOMER_FORM = `
     ${labelledField('মিটার স্থাপনের তারিখ', '15/03/2021 14:22:31')}
     ${labelledField('অনুমোদিত লোড (কি.ও)', '2')}
     ${labelledField('মিনিমাম রিচার্জের পরিমাণ (টাকা)', '200')}
-    ${labelledField('অবশিষ্ট ব্যালেন্স (৩১/০১/২০২৫ ১০:০০)', '1,523.45')}
+    ${labelledField(BALANCE_LABEL, '1,523.45')}
   </form>`;
 
 const RECHARGE_TABLE = `
@@ -168,13 +187,10 @@ export const NON_NUMERIC_BALANCE_PAGE = page(
  * a usable reading.
  */
 export const UNSTAMPED_BALANCE_PAGE = page(
-  CUSTOMER_FORM.replace(
-    'অবশিষ্ট ব্যালেন্স (৩১/০১/২০২৫ ১০:০০)',
-    'অবশিষ্ট ব্যালেন্স',
-  ),
+  CUSTOMER_FORM.replace(BALANCE_LABEL, 'অবশিষ্ট ব্যালেন্স (টাকা)'),
 );
 
 /** A detail form whose "as of" stamp has stopped being a date. */
 export const UNREADABLE_STAMP_PAGE = page(
-  CUSTOMER_FORM.replace('৩১/০১/২০২৫ ১০:০০', 'হালনাগাদ হয়নি'),
+  CUSTOMER_FORM.replace(BALANCE_STAMP, 'হালনাগাদ হয়নি'),
 );

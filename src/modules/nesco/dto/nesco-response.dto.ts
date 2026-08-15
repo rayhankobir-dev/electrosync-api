@@ -72,7 +72,7 @@ export class NescoCustomerInfoDto {
     example: 1738296000,
     nullable: true,
     description:
-      'When `currentBalance` was settled by the portal, Unix epoch seconds (UTC). NESCO publishes balances in a batch and stamps the figure with the instant it covers, so this is the balance\'s validity time — not when we read it. Null when the portal omitted the stamp.',
+      "When `currentBalance` was settled by the portal, Unix epoch seconds (UTC). NESCO publishes balances in a batch and stamps the figure with the instant it covers, so this is the balance's validity time — not when we read it. Null when the portal omitted the stamp.",
   })
   balanceAsOf: number | null;
 }

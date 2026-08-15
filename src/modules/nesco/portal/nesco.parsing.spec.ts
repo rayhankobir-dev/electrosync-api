@@ -137,12 +137,27 @@ describe('parseCustomerInfo', () => {
   });
 
   it('reads the settlement stamp out of the balance label', () => {
-    // "অবশিষ্ট ব্যালেন্স (৩১/০১/২০২৫ ১০:০০)" — 31 Jan 2025 10:00 Bangladesh
-    // time. The portal publishes the balance in batches and stamps the label
-    // with the instant it settles, which is the only period boundary we get.
+    // "…(টাকা)(সময়ঃ 31 January 2025 10:00:00 AM )" — 31 Jan 2025 10:00
+    // Bangladesh time. The portal publishes the balance in batches and stamps
+    // the label with the instant it settles, which is the only period boundary
+    // we get.
     expect(parseBalance(RECHARGE_HISTORY_PAGE, CUSTOMER_NO).asOf).toBe(
       1738296000,
     );
+  });
+
+  it('reads a midnight stamp as the start of the day, not noon', () => {
+    // Verbatim from a live portal response on 2026-08-15. The portal settles
+    // at 00:00, so "12:00:00 AM" is the boundary that *closes* 14 August —
+    // reading it as noon would bill a whole day's consumption to the wrong
+    // date, and reading it as absent falls back to poll time, which is how
+    // settlement windows silently became cron windows.
+    const page = RECHARGE_HISTORY_PAGE.replace(
+      'অবশিষ্ট ব্যালেন্স (টাকা)(সময়ঃ 31 January 2025 10:00:00 AM )',
+      'অবশিষ্ট ব্যালেন্স (টাকা)(সময়ঃ 15 August 2026 12:00:00 AM )',
+    );
+
+    expect(parseBalance(page, CUSTOMER_NO).asOf).toBe(1786730400);
   });
 
   it('reports a missing stamp as absent rather than failing the read', () => {

@@ -170,6 +170,25 @@ export function parseInstallationDate(raw: string): number {
   return parseSlashDateTime(raw, 'meterInstalledAt');
 }
 
+/**
+ * Converts a 12-hour clock reading to the 24-hour hour component.
+ *
+ * The two midnight/noon cases are the ones worth naming: `12 AM` is hour 0 and
+ * `12 PM` is hour 12, so the naive "add twelve for PM" is wrong at both ends of
+ * the day. The portal settles balances at `12:00:00 AM`, which makes this the
+ * difference between attributing a day's consumption to the right date and to
+ * the middle of the next one.
+ */
+function to24Hour(rawHour: string, meridiem: string, raw: string): number {
+  const hour = Number(rawHour);
+  if (hour < 1 || hour > 12) {
+    throw layoutError(`Hour out of range for a 12-hour clock in "${raw}"`);
+  }
+
+  if (meridiem.toUpperCase() === 'AM') return hour === 12 ? 0 : hour;
+  return hour === 12 ? 12 : hour + 12;
+}
+
 /** Parses a recharge stamp: `dd-MMM-yyyy hh:mm AM|PM`. */
 export function parseRechargeDate(raw: string): number {
   const match =
@@ -192,12 +211,7 @@ export function parseRechargeDate(raw: string): number {
     );
   }
 
-  let hour = Number(rawHour);
-  if (hour < 1 || hour > 12) {
-    throw layoutError(`Hour out of range for a 12-hour clock in "${raw}"`);
-  }
-  if (meridiem.toUpperCase() === 'PM' && hour !== 12) hour += 12;
-  if (meridiem.toUpperCase() === 'AM' && hour === 12) hour = 0;
+  const hour = to24Hour(rawHour, meridiem, raw);
 
   return dhakaTimeToEpochSeconds(
     {
@@ -399,12 +413,65 @@ export interface PortalBalance {
  * and `resolveReadingInstant` marks the reading estimated, which the sweep logs.
  * Accuracy degrades loudly; nothing breaks.
  */
+/**
+ * Parses the settlement stamp: `সময়ঃ 15 August 2026 12:00:00 AM`.
+ *
+ * A third date format for a third field, because the portal genuinely uses
+ * three: slashes and a 24-hour clock for installation, `dd-MMM-yyyy hh:mm AM`
+ * for recharges, and this — a Bengali `সময়ঃ` prefix, an English full month
+ * name, and a 12-hour clock with seconds.
+ *
+ * The leading prefix is stripped as "everything before the first digit" rather
+ * than matched literally, so a portal that switches to `Time:` or drops the
+ * label keeps working. `12:00:00 AM` is midnight: NESCO settles at the start of
+ * the day, so this stamp closes the day before it, and reading the meridiem
+ * backwards would shift every daily figure by twelve hours.
+ */
+function parseBalanceStamp(raw: string, field: string): number {
+  const match =
+    /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(
+      toAsciiDigits(raw)
+        .replace(/^[^\d]+/, '')
+        .trim(),
+    );
+
+  if (!match) {
+    throw layoutError(
+      `Expected "${field}" as "d MMMM yyyy h:mm:ss AM/PM" but received "${raw}"`,
+    );
+  }
+
+  const [, day, monthName, year, rawHour, minute, second, meridiem] = match;
+
+  // English month names are uniquely determined by their first three letters,
+  // which is exactly the table the recharge parser already carries.
+  const monthIndex = MONTH_ABBREVIATIONS[monthName.slice(0, 3).toUpperCase()];
+  if (monthIndex === undefined) {
+    throw layoutError(`Unrecognised month "${monthName}" in "${field}"`);
+  }
+
+  return dhakaTimeToEpochSeconds(
+    {
+      year: Number(year),
+      monthIndex,
+      day: Number(day),
+      hour: to24Hour(rawHour, meridiem, raw),
+      minute: Number(minute),
+      second: Number(second ?? '0'),
+    },
+    field,
+    raw,
+  );
+}
+
 function parseBalanceAsOf(label: string): number | null {
+  // The last parenthesised group, not the first: the live label carries two —
+  // "(টাকা)(সময়ঃ …)" — and the currency one comes first.
   const stamp = /\(([^)]*)\)\s*$/.exec(label);
   if (!stamp) return null;
 
   try {
-    return parseSlashDateTime(stamp[1], 'balanceAsOf');
+    return parseBalanceStamp(stamp[1], 'balanceAsOf');
   } catch {
     return null;
   }

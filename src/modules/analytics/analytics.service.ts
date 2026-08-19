@@ -160,10 +160,19 @@ export class AnalyticsService {
       ? sql`AND s.meter_id = ${query.meterId}`
       : sql``;
 
+    // How much of this day the window actually covered, as an interval. This
+    // is a genuine time question — it answers "how much of the day did we
+    // observe" — so unlike cost it is still apportioned across every day the
+    // window touches.
+    const overlap = sql`(
+      LEAST(b.we, d + interval '1 day') - GREATEST(b.ws, d)
+    )`;
+
     // The day a window closes on, and therefore the day everything it measured
     // is billed to. The microsecond step keeps a window ending exactly at
     // midnight attributed to the day it ran through, not the one it merely
-    // touched — without it every daily sweep would bill the following day.
+    // touched — without it three of the four daily sweeps would each emit a
+    // phantom zero-second row on the next day.
     const closingDay = sql`date_trunc('day', b.we - interval '1 microsecond')`;
 
     const spread = sql`
@@ -180,44 +189,37 @@ export class AnalyticsService {
           AND s.window_start < ${rangeEnd}
           ${meterFilter}
       ),
-      -- One row per settlement, on the day it closed. Everything a bucket
-      -- reports is therefore derived from the same set of settlements under a
-      -- single attribution rule.
-      --
-      -- Consumption lands whole on the closing day rather than being spread
-      -- across the days the window crossed. The portal publishes one figure per
-      -- settlement period and says nothing about its internal shape, so
-      -- pro-rating by elapsed time invents a distribution it never reported.
-      -- NESCO settles in batches, which routinely produces a period running
-      -- from one evening into the next morning: split, a single ৳64.26
-      -- settlement becomes ৳32.13 on each of two days, and *both* disagree with
-      -- what the customer sees on the portal. Attributing it whole keeps every
-      -- daily figure reconcilable against the source.
-      --
-      -- An earlier version emitted a row for every day a window touched so that
-      -- observed seconds could be apportioned separately from cost. That let
-      -- the two disagree: when a missed reading produced one window spanning two
-      -- days, the day that was merely crossed reported a full day of coverage
-      -- against a cost of zero — asserting a fully observed day on which
-      -- nothing was spent. A day whose usage was never published separately has
-      -- no figure of its own, and now has no row either.
       spread AS (
         SELECT
-          ${closingDay}::date AS day,
-          -- The whole settlement period, not the slice falling inside its
-          -- closing day. The cost describes the entire period, so the time this
-          -- vouches for has to describe the entire period too — that identity is
-          -- what keeps coverage honest about what the cost covers.
-          EXTRACT(EPOCH FROM (b.we - b.ws)) AS secs,
-          b.consumed_cost AS cost,
-          -- A recharge is a point event with a known timestamp, so it was never
-          -- split either. Same closing day, same reason.
-          b.recharge_paid AS recharged
+          d::date AS day,
+          EXTRACT(EPOCH FROM ${overlap}) AS secs,
+          -- Consumption lands whole on the closing day rather than being
+          -- spread across the days the window crossed.
+          --
+          -- The portal publishes one figure per settlement period and says
+          -- nothing about its internal shape, so pro-rating by elapsed time
+          -- invents a distribution it never reported. NESCO settles in
+          -- batches, which routinely produces a period running from one
+          -- evening into the next morning: split, a single ৳64.26 settlement
+          -- becomes ৳32.13 on each of two days, and *both* disagree with what
+          -- the customer sees on the portal. Attributing it whole keeps every
+          -- daily figure reconcilable against the source.
+          CASE WHEN d = ${closingDay} THEN b.consumed_cost ELSE 0 END AS cost,
+          -- A recharge is a point event with a known timestamp, so it was
+          -- never split either. Same closing day, same reason.
+          CASE WHEN d = ${closingDay} THEN b.recharge_paid ELSE 0 END AS recharged
         FROM bounds b
-        -- Clips a window that overlapped the range, and so survived bounds,
-        -- but settles outside it.
-        WHERE ${closingDay}::date >= ${days[0]}::date
-          AND ${closingDay}::date <= ${days[days.length - 1]}::date
+        CROSS JOIN LATERAL generate_series(
+          date_trunc('day', b.ws),
+          -- Same expression the cost lands on, so the series is guaranteed to
+          -- contain the closing day and the CASE arms above can never silently
+          -- drop a window's whole cost by matching nothing.
+          ${closingDay},
+          interval '1 day'
+        ) AS d
+        -- Clips days a straddling window pulled in from outside the request.
+        WHERE d::date >= ${days[0]}::date
+          AND d::date <= ${days[days.length - 1]}::date
       )
     `;
 
@@ -278,20 +280,15 @@ export class AnalyticsService {
   ): UsagePointDto {
     const secs = Number(row.secs ?? 0);
     const expectedDays = this.expectedDays(query, row.bucket, days);
-
-    // Days' worth of settlement time behind this bucket's cost. Exceeds 1 when
-    // a missed reading batched several days into one published figure, which is
-    // precisely the case `coverage` cannot express — it saturates at 1, so on
-    // its own it renders a two-day figure indistinguishable from one heavy day.
-    const settledDays = secs / (SECONDS_PER_DAY * meterCount);
     const coverage =
-      expectedDays === 0 ? 0 : Math.min(settledDays / expectedDays, 1);
+      expectedDays === 0
+        ? 0
+        : Math.min(secs / (SECONDS_PER_DAY * expectedDays * meterCount), 1);
 
     const point: UsagePointDto = {
       consumedCost: round(Number(row.cost ?? 0)),
       rechargedAmount: round(Number(row.recharged ?? 0)),
       coverage: round(coverage),
-      settledDays: round(settledDays),
     };
 
     if (query.granularity === USAGE_GRANULARITY.WEEKDAY) {

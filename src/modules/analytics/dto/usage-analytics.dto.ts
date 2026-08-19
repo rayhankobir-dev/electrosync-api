@@ -57,11 +57,7 @@ export class UsagePointDto {
   })
   weekday?: number;
 
-  @ApiProperty({
-    example: 172.4,
-    description:
-      'Consumption cost in BDT, as published by the portal for the settlement periods that closed in this bucket. A day the portal never published a separate figure for — because a missed reading batched it into a longer period — has no point at all rather than a point of 0. Check `settledDays` before reading this as one day of spend.',
-  })
+  @ApiProperty({ example: 172.4, description: 'Consumption cost in BDT.' })
   consumedCost: number;
 
   @ApiProperty({
@@ -74,16 +70,9 @@ export class UsagePointDto {
   @ApiProperty({
     example: 0.75,
     description:
-      'Fraction of the bucket covered by the settlements its cost came from, 0–1. Below 1 the cost is a floor, not a total — the gap is missing data, not an idle meter. Saturates at 1, so it cannot report a bucket holding more than its own length; `settledDays` can.',
+      'Fraction of the bucket actually covered by readings, 0–1. Below 1 the cost is a floor, not a total — the gap is missing data, not an idle meter.',
   })
   coverage: number;
-
-  @ApiProperty({
-    example: 2,
-    description:
-      "Days' worth of settlement time behind `consumedCost`. Normally 1 for a daily bucket. Above 1 means the portal published one figure covering several days — a missed reading batched them together — so this bucket's cost is that whole period, not one day of it. Below 1 means the period was shorter than the bucket.",
-  })
-  settledDays: number;
 }
 
 export class UsageTotalsDto {
@@ -110,7 +99,7 @@ export class UsageAnalyticsDto {
   @ApiProperty({
     example: 19,
     description:
-      'Distinct Dhaka days in the range that a settlement closed on, and whose usage is therefore separately known. Lets a client tell "no data yet" apart from "genuinely no usage", and decide whether a pattern has enough history to be worth showing. A day merely crossed by a longer settlement period does not count.',
+      'Distinct Dhaka days in the range that carry at least one reading. Lets a client tell "no data yet" apart from "genuinely no usage", and decide whether a pattern has enough history to be worth showing.',
   })
   observedDays: number;
 
